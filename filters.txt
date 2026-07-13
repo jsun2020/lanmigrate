@@ -1,0 +1,41 @@
+# ============================================================
+# LanMigrate M0 排除规则(rclone filter 语法:- 开头 = 排除)
+# 注意:M0 为一刀切排除;若有重要目录恰好同名,删掉对应行
+# ============================================================
+
+# ---- 开发依赖(到新电脑后 npm install / pip install 重建)----
+- node_modules/**
+- venv/**
+- .venv/**
+- __pycache__/**
+- .pytest_cache/**
+- .mypy_cache/**
+- .next/**
+- .nuxt/**
+- .turbo/**
+- .cache/**
+- dist/**
+- build/**
+- target/**
+- .gradle/**
+- Pods/**
+- DerivedData/**
+- *.pyc
+
+# ---- Windows 系统文件(无法/无需迁移)----
+- $RECYCLE.BIN/**
+- System Volume Information/**
+- pagefile.sys
+- hiberfil.sys
+- swapfile.sys
+- Thumbs.db
+- desktop.ini
+- *.tmp
+
+# ---- macOS 垃圾(如果源盘曾被 Mac 写入)----
+- .DS_Store
+- ._*
+
+# ---- 应用缓存(可选,不需要就删掉这几行)----
+- AppData/Local/Temp/**
+- AppData/Local/Microsoft/Windows/INetCache/**
