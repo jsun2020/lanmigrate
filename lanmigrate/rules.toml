@@ -1,0 +1,64 @@
+# LanMigrate exclusion rules (PRD F3).
+#
+# [[rules]]: context-aware. A directory is excluded ONLY when a marker file
+# sits next to it (same directory). This is what prevents a user folder that
+# happens to be called "build" from being skipped.
+#
+# [global]: verbatim rclone filter patterns for unambiguous junk that is safe
+# to exclude everywhere (system files, caches that are always rebuildable).
+#
+# Community contributions welcome: add a [[rules]] block per ecosystem.
+
+[global]
+exclude = [
+    # Windows system files
+    "$RECYCLE.BIN/**",
+    "System Volume Information/**",
+    "pagefile.sys",
+    "hiberfil.sys",
+    "swapfile.sys",
+    "Thumbs.db",
+    "desktop.ini",
+    "*.tmp",
+    # macOS junk (in case the source disk was ever written by a Mac)
+    ".DS_Store",
+    "._*",
+    # Python bytecode caches are rebuildable junk wherever they appear
+    "__pycache__/**",
+    "*.pyc",
+]
+
+[[rules]]
+name = "Node.js"
+markers = ["package.json"]
+exclude = ["node_modules", ".next", ".nuxt", ".turbo", ".cache", "dist", "build"]
+
+[[rules]]
+name = "Python"
+markers = ["requirements.txt", "pyproject.toml", "setup.py", "Pipfile"]
+exclude = ["venv", ".venv", ".pytest_cache", ".mypy_cache", ".tox"]
+
+[[rules]]
+name = "Rust"
+markers = ["Cargo.toml"]
+exclude = ["target"]
+
+[[rules]]
+name = "Java (Maven)"
+markers = ["pom.xml"]
+exclude = ["target"]
+
+[[rules]]
+name = "Java (Gradle)"
+markers = ["build.gradle", "build.gradle.kts"]
+exclude = ["build", ".gradle"]
+
+[[rules]]
+name = "iOS"
+markers = ["Podfile"]
+exclude = ["Pods", "DerivedData"]
+
+[[rules]]
+name = "PHP"
+markers = ["composer.json"]
+exclude = ["vendor"]
