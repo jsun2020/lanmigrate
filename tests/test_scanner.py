@@ -88,6 +88,18 @@ def test_filter_escaping():
     assert scanner._escape_filter("a[1]/b*") == "a\\[1\\]/b\\*"
 
 
+def test_fast_scan_finds_same_exclusions_without_sizes(tree: Path):
+    fast = scanner.scan(tree, compute_sizes=False)
+    full = scanner.scan(tree, compute_sizes=True)
+    assert {e.rel for e in fast.exclusions} == {e.rel for e in full.exclusions}
+    assert all(e.size == -1 for e in fast.exclusions)
+    assert fast.saved_bytes == 0  # unknown sizes are not summed
+    assert fast.total_bytes == 0
+    assert fast.file_count == full.file_count
+    # filter output identical either way
+    assert scanner.build_filter_lines(fast) == scanner.build_filter_lines(full)
+
+
 def test_scan_reports_progress(tree: Path):
     calls = []
     scanner.scan(tree, on_progress=lambda files, size, rel: calls.append((files, size, rel)))

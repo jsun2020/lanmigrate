@@ -31,7 +31,7 @@ class Exclusion:
     rel: str  # posix path relative to scan root
     rule: str  # rule name, e.g. "Node.js"
     marker: str  # the marker file that triggered it
-    size: int  # bytes
+    size: int  # bytes; -1 = unknown (fast scan skips sizing)
 
 
 @dataclass
@@ -45,7 +45,7 @@ class ScanReport:
 
     @property
     def saved_bytes(self) -> int:
-        return sum(e.size for e in self.exclusions)
+        return sum(e.size for e in self.exclusions if e.size > 0)
 
     @property
     def transfer_bytes(self) -> int:
@@ -73,10 +73,15 @@ def _dir_size(path: Path) -> int:
 
 
 def scan(root: Path, rules_file: Path = RULES_FILE,
-         on_progress=None) -> ScanReport:
+         on_progress=None, compute_sizes: bool = True) -> ScanReport:
     """Walk `root` applying exclusion rules. `on_progress(files, bytes, rel_dir)`
     is called once per directory so the CLI can show the scan is alive on
-    large trees (a full stat pass over a big disk takes minutes)."""
+    large trees (a full stat pass over a big disk takes minutes).
+
+    compute_sizes=False is the fast-start mode: only the directory structure
+    is walked (no per-file stat, no sizing of excluded dirs), so the exclusion
+    list is ready in seconds and the transfer can begin immediately. Exclusion
+    sizes are -1 (unknown) and total_bytes stays 0."""
     root = Path(root).resolve()
     rules, global_patterns = load_rules(rules_file)
     report = ScanReport(root=root, global_patterns=global_patterns)
@@ -94,7 +99,7 @@ def scan(root: Path, rules_file: Path = RULES_FILE,
                 if dep in excluded_here or dep not in dirnames:
                     continue
                 dep_path = here / dep
-                size = _dir_size(dep_path)
+                size = _dir_size(dep_path) if compute_sizes else -1
                 report.exclusions.append(Exclusion(
                     path=dep_path,
                     rel=dep_path.relative_to(root).as_posix(),
@@ -102,10 +107,11 @@ def scan(root: Path, rules_file: Path = RULES_FILE,
                     marker=marker,
                     size=size,
                 ))
-                report.total_bytes += size
+                if size > 0:
+                    report.total_bytes += size
                 excluded_here.add(dep)
 
-        if ".git" in dirnames:
+        if compute_sizes and ".git" in dirnames:
             git_size = _dir_size(here / ".git")
             if git_size >= GIT_REPORT_THRESHOLD:
                 rel = (here / ".git").relative_to(root).as_posix()
@@ -114,12 +120,15 @@ def scan(root: Path, rules_file: Path = RULES_FILE,
         # do not descend into excluded dirs (their size is already counted)
         dirnames[:] = [d for d in dirnames if d not in excluded_here]
 
-        for name in filenames:
-            try:
-                report.total_bytes += os.lstat(os.path.join(dirpath, name)).st_size
-                report.file_count += 1
-            except OSError:
-                continue
+        if compute_sizes:
+            for name in filenames:
+                try:
+                    report.total_bytes += os.lstat(os.path.join(dirpath, name)).st_size
+                    report.file_count += 1
+                except OSError:
+                    continue
+        else:
+            report.file_count += len(filenames)
 
         if on_progress is not None:
             try:

@@ -32,6 +32,8 @@ ASSUMED_LAN_SPEED = 50 * 1024 * 1024  # bytes/s, for "time saved" estimate only
 
 
 def _human(n: float) -> str:
+    if n < 0:
+        return "?"  # unknown (fast scan skips sizing)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
             return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
@@ -118,7 +120,11 @@ def _confirm_exclusions(report: scanner.ScanReport, assume_yes: bool) -> set[str
         return enabled
 
     while True:
-        table = Table(title=f"智能排除建议(共可节省 {_human(report.saved_bytes)})")
+        if report.saved_bytes > 0:
+            title = f"智能排除建议(共可节省 {_human(report.saved_bytes)})"
+        else:
+            title = f"智能排除建议(共 {len(report.exclusions)} 个依赖目录)"
+        table = Table(title=title)
         table.add_column("#", justify="right")
         table.add_column("选中")
         table.add_column("类型")
@@ -233,13 +239,17 @@ def send(
     code: Optional[str] = typer.Option(None, help="接收端屏幕上的 6 位配对码"),
     dest: str = typer.Option("/", help="接收目录下的子路径"),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过所有确认(排除建议全部采纳)"),
+    full: bool = typer.Option(False, "--full", help="完整预扫描:统计体积并给出节省报告(大目录需几分钟)"),
     max_rounds: int = typer.Option(100, help="最大自动重跑轮数"),
     wait: int = typer.Option(60, help="每轮之间等待秒数"),
 ) -> None:
     """在旧电脑上运行:扫描、确认排除、配对并开始迁移。"""
     console.print(f"\n[bold cyan]LanMigrate v{__version__} - 发送端[/]")
     _prepare_rclone()
-    console.print(f"正在扫描 {source} …(大目录可能需要几分钟)")
+    if full:
+        console.print(f"正在完整扫描 {source} …(统计体积,大目录可能需要几分钟)")
+    else:
+        console.print(f"正在快速扫描 {source} …(仅识别排除目录,--full 可统计体积)")
     last_update = [0.0]
     with console.status("扫描中…") as status:
 
@@ -249,15 +259,22 @@ def send(
                 return
             last_update[0] = now
             shown = rel if len(rel) <= 50 else "…" + rel[-49:]
-            status.update(f"已扫描 {files} 个文件 / {_human(size)}  当前: {shown}")
+            info = f"已扫描 {files} 个文件"
+            if full:
+                info += f" / {_human(size)}"
+            status.update(f"{info}  当前: {shown}")
 
-        report = scanner.scan(source, on_progress=scan_progress)
-    console.print(f"  共 {report.file_count} 个文件,总计 {_human(report.total_bytes)}")
+        report = scanner.scan(source, on_progress=scan_progress, compute_sizes=full)
+    if full:
+        console.print(f"  共 {report.file_count} 个文件,总计 {_human(report.total_bytes)}")
+    else:
+        console.print(f"  共发现 {report.file_count} 个文件,{len(report.exclusions)} 个可跳过的依赖目录")
 
     enabled = _confirm_exclusions(report, assume_yes=yes)
     filter_lines = scanner.build_filter_lines(report, enabled)
-    saved = sum(e.size for e in report.exclusions if e.rel in enabled)
-    console.print(f"实际需传输约 {_human(report.total_bytes - saved)}")
+    saved = sum(e.size for e in report.exclusions if e.rel in enabled and e.size > 0)
+    if full:
+        console.print(f"实际需传输约 {_human(report.total_bytes - saved)}")
 
     host, port, fp = _pick_receiver(host, port)
     if not code:

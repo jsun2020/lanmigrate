@@ -5,6 +5,32 @@
 
 ---
 
+## Version Update: v0.2.0 - 2026-07-13
+
+### Feature Summary
+快速启动模式(新默认):仅遍历目录结构生成排除清单(秒级),跳过全量体积统计,配对后立即开始传输 — AirDrop 式体验。原完整预扫描(F6 体积报告)改为 `--full` 可选。
+
+### Business Value
+用户反馈:配对前的全盘扫描等待数分钟,与 AirDrop"配对即传"的预期差距大。传输层本身已是线速(rclone 8 并发),唯一可省的开销就是预扫描的 stat 全量文件 + 排除目录体积计算。
+
+### Solution Overview
+`scanner.scan()` 增加 `compute_sizes` 开关:关闭时不逐文件 stat、不计算排除目录体积(size 记为 -1 = 未知),目录结构遍历秒级完成;排除确认表仍然展示(F3 人工确认是硬性要求),体积列显示 "?"。`--full` 保留原行为与"节省了 X GB"报告。
+
+### Affected Components
+| Component | Change Type | Description |
+|-----------|-------------|-------------|
+| scanner.py | Modified | compute_sizes 开关;saved_bytes 只累加已知体积 |
+| cli.py | Modified | send 默认快速模式,新增 --full;显示逻辑适配未知体积 |
+| engine/taskstore/discovery/pairing | No Change | 与扫描深度正交 |
+
+### Acceptance Criteria
+- [x] 默认 send 在大目录上数秒内进入排除确认(不再分钟级)
+- [x] 快速模式排除仍然上下文相关且可确认;filter 内容与完整模式一致
+- [x] --full 行为与 v0.1 完全一致(体积报告、节省统计)
+- [x] 全部既有测试通过,e2e(中断+续传)通过
+
+---
+
 ## 1. 背景与问题
 
 ### 1.1 真实场景

@@ -36,8 +36,10 @@ python -m lanmigrate receive ~/Migration          # Mac
 python -m lanmigrate send D:\projects
 ```
 
-流程:扫描 -> 显示"智能排除建议"(可勾选)-> 自动发现接收端(或手动
-`--host <IP>`)-> 输入配对码 -> 开始传输。之后即可走人:
+流程:快速扫描(秒级,仅识别可跳过的依赖目录)-> 显示"智能排除建议"(可勾选)
+-> 自动发现接收端(或手动 `--host <IP>`)-> 输入配对码 -> 立即开始传输。
+如需完整体积统计与"节省了 X GB"报告,加 `--full`(大目录需几分钟)。
+之后即可走人:
 
 - 任何时候 Ctrl+C / 断网 / 关机都安全
 - 恢复:`python -m lanmigrate resume`(换了 Wi-Fi/IP 也能自动找回设备)
