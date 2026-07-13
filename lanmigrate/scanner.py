@@ -72,7 +72,11 @@ def _dir_size(path: Path) -> int:
     return total
 
 
-def scan(root: Path, rules_file: Path = RULES_FILE) -> ScanReport:
+def scan(root: Path, rules_file: Path = RULES_FILE,
+         on_progress=None) -> ScanReport:
+    """Walk `root` applying exclusion rules. `on_progress(files, bytes, rel_dir)`
+    is called once per directory so the CLI can show the scan is alive on
+    large trees (a full stat pass over a big disk takes minutes)."""
     root = Path(root).resolve()
     rules, global_patterns = load_rules(rules_file)
     report = ScanReport(root=root, global_patterns=global_patterns)
@@ -116,6 +120,13 @@ def scan(root: Path, rules_file: Path = RULES_FILE) -> ScanReport:
                 report.file_count += 1
             except OSError:
                 continue
+
+        if on_progress is not None:
+            try:
+                rel = here.relative_to(root).as_posix()
+            except ValueError:
+                rel = str(here)
+            on_progress(report.file_count, report.total_bytes, rel)
 
     return report
 

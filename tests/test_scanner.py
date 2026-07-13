@@ -86,3 +86,13 @@ def test_filter_lines_respects_user_selection(tree: Path):
 
 def test_filter_escaping():
     assert scanner._escape_filter("a[1]/b*") == "a\\[1\\]/b\\*"
+
+
+def test_scan_reports_progress(tree: Path):
+    calls = []
+    scanner.scan(tree, on_progress=lambda files, size, rel: calls.append((files, size, rel)))
+    assert calls, "on_progress never called"
+    files, size, _rel = calls[-1]
+    assert files > 0 and size > 0
+    # monotonically non-decreasing counters
+    assert [c[0] for c in calls] == sorted(c[0] for c in calls)

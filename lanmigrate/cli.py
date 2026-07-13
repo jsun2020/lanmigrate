@@ -44,6 +44,22 @@ def _version_banner() -> None:
     pass
 
 
+def _prepare_rclone():
+    """ensure_rclone with visible feedback: the first run downloads ~25MB,
+    which previously happened in total silence and looked like a hang."""
+    from . import rclone_bin
+
+    found = rclone_bin.find_rclone()
+    if found:
+        return found
+    console.print("  首次运行: 正在下载 rclone(约 25MB,视网络情况需 1~3 分钟)…")
+    console.print("  [dim]提示: 预先安装 rclone 可跳过此步(Mac: brew install rclone)[/]")
+    with console.status("下载 rclone 中…"):
+        path = rclone_bin.download_rclone()
+    console.print(f"  rclone 已就绪: {path}")
+    return path
+
+
 # ---------------------------------------------------------------- receive
 
 
@@ -57,12 +73,12 @@ def receive(
     """在新电脑上运行:启动接收服务并显示配对码。"""
     directory = directory or (Path.home() / "Migration")
     directory.mkdir(parents=True, exist_ok=True)
-    rclone = engine.ensure_rclone()
+    console.print(f"\n[bold cyan]LanMigrate v{__version__} - 接收端[/]")
+    rclone = _prepare_rclone()
     code = code or pairing.generate_code()
     password = pairing.session_password(code)
     fp = pairing.device_fingerprint()
 
-    console.print(f"\n[bold cyan]LanMigrate v{__version__} - 接收端[/]")
     console.print(f"  接收目录: {directory}")
     console.print(f"  本机地址: {discovery.local_ip()}:{port}")
     console.print(f"  rclone:   {rclone}")
@@ -221,10 +237,21 @@ def send(
     wait: int = typer.Option(60, help="每轮之间等待秒数"),
 ) -> None:
     """在旧电脑上运行:扫描、确认排除、配对并开始迁移。"""
-    engine.ensure_rclone()
     console.print(f"\n[bold cyan]LanMigrate v{__version__} - 发送端[/]")
-    console.print(f"正在扫描 {source} …")
-    report = scanner.scan(source)
+    _prepare_rclone()
+    console.print(f"正在扫描 {source} …(大目录可能需要几分钟)")
+    last_update = [0.0]
+    with console.status("扫描中…") as status:
+
+        def scan_progress(files: int, size: int, rel: str) -> None:
+            now = time.monotonic()
+            if now - last_update[0] < 0.5:
+                return
+            last_update[0] = now
+            shown = rel if len(rel) <= 50 else "…" + rel[-49:]
+            status.update(f"已扫描 {files} 个文件 / {_human(size)}  当前: {shown}")
+
+        report = scanner.scan(source, on_progress=scan_progress)
     console.print(f"  共 {report.file_count} 个文件,总计 {_human(report.total_bytes)}")
 
     enabled = _confirm_exclusions(report, assume_yes=yes)
