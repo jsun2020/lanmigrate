@@ -118,3 +118,34 @@ def test_resume_without_tasks(session, tmp_path, monkeypatch):
     reply = call(session, "resume")
     assert reply["ok"] is False
     assert "没有未完成的任务" in reply["error"]
+
+
+def test_sync_without_tasks(session, tmp_path, monkeypatch):
+    monkeypatch.setattr(taskstore, "TASKS_DIR", tmp_path / "tasks")
+    reply = call(session, "sync")
+    assert reply["ok"] is False
+    assert "没有可同步的任务" in reply["error"]
+
+
+def test_sync_reruns_done_task_in_update_mode(session, tmp_path, monkeypatch):
+    """sync must pick a DONE task (resume won't), reset rounds, and start
+    the worker with update=True."""
+    monkeypatch.setattr(taskstore, "TASKS_DIR", tmp_path / "tasks")
+    task = taskstore.MigrationTask(
+        task_id="t-done", source="C:/src", host="10.0.0.2", port=2022,
+        user="lanmigrate", obscured_pass="xx",
+        status=taskstore.STATUS_DONE, rounds_completed=3)
+    taskstore.save(task)
+
+    sess, _events = session
+    started = {}
+
+    def fake_worker(t, max_rounds, wait, update=False):
+        started.update(task=t, update=update)
+
+    monkeypatch.setattr(sess, "_start_worker", fake_worker)
+    reply = call(session, "sync")
+    assert reply["ok"] is True
+    assert reply["result"]["task"]["task_id"] == "t-done"
+    assert started["update"] is True
+    assert started["task"].rounds_completed == 0  # fresh pass

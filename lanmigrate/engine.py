@@ -110,9 +110,16 @@ def build_copy_cmd(
     source: Path,
     remote: str,
     filter_file: Optional[Path] = None,
+    update: bool = False,
 ) -> list[str]:
+    """`update=True` is sync mode (PRD F9): --update skips files that are
+    newer on the receiver, so edits made on the new machine during the
+    transition period are never overwritten. Deletions never propagate
+    either way (this is rclone copy, not rclone sync)."""
     cmd = [str(rclone), "copy", str(source), remote, *BASE_COPY_FLAGS,
            "--use-json-log", "--log-level", "INFO", "--stats", STATS_INTERVAL]
+    if update:
+        cmd.append("--update")
     if filter_file is not None:
         cmd += ["--filter-from", str(filter_file)]
     return cmd
@@ -125,13 +132,14 @@ def run_copy(
     log_file: Optional[Path] = None,
     on_progress: Optional[Callable[[Progress], None]] = None,
     on_start: Optional[Callable[[subprocess.Popen], None]] = None,
+    update: bool = False,
 ) -> int:
     """Run one rclone copy round. Returns the rclone exit code (0 = every
     file transferred or already up to date). Never raises on rclone failure;
     the caller loops until 0 (PRD F2 unattended loop). `on_start` receives
     the Popen handle so a GUI can terminate mid-round."""
     rclone = ensure_rclone()
-    cmd = build_copy_cmd(rclone, source, remote, filter_file)
+    cmd = build_copy_cmd(rclone, source, remote, filter_file, update=update)
     log_fh = open(log_file, "a", encoding="utf-8") if log_file else None
     try:
         proc = subprocess.Popen(

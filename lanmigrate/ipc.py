@@ -256,6 +256,28 @@ class Session:
         self._start_worker(task, max_rounds, wait)
         return {"task": _task_info(task)}
 
+    def ipc_sync(self, task_id: Optional[str] = None,
+                 max_rounds: int = 100, wait: int = 60) -> dict:
+        """Incremental sync (PRD F9): re-run any task, done ones included.
+        --update mode never overwrites files that are newer on the receiver."""
+        if self._send_thread is not None and self._send_thread.is_alive():
+            raise IpcError("已有传输任务在进行中")
+        task = taskstore.load(task_id) if task_id else taskstore.latest_task()
+        if task is None:
+            raise IpcError("没有可同步的任务,请先完成一次迁移")
+        if task.device_fp:
+            for r in discovery.discover(timeout=5.0):
+                if (r.fingerprint == task.device_fp
+                        and (r.host, r.port) != (task.host, task.port)):
+                    self._emit({"event": "status",
+                                "msg": f"设备 IP 已变化: {task.host} -> {r.host}"})
+                    task.host, task.port = r.host, r.port
+                    taskstore.save(task)
+                    break
+        task.rounds_completed = 0  # fresh pass over the whole tree
+        self._start_worker(task, max_rounds, wait, update=True)
+        return {"task": _task_info(task)}
+
     def ipc_cancel_send(self) -> dict:
         running = self._send_thread is not None and self._send_thread.is_alive()
         self._cancel.set()
@@ -267,14 +289,15 @@ class Session:
     # ------------------------------------------------------------ worker
 
     def _start_worker(self, task: taskstore.MigrationTask,
-                      max_rounds: int, wait: int) -> None:
+                      max_rounds: int, wait: int, update: bool = False) -> None:
         self._cancel.clear()
         self._send_thread = threading.Thread(
-            target=self._transfer_loop, args=(task, max_rounds, wait), daemon=True)
+            target=self._transfer_loop, args=(task, max_rounds, wait, update),
+            daemon=True)
         self._send_thread.start()
 
     def _transfer_loop(self, task: taskstore.MigrationTask,
-                       max_rounds: int, wait: int) -> None:
+                       max_rounds: int, wait: int, update: bool = False) -> None:
         """Unattended rerun-until-exit-0 loop (same semantics as cli._run_task,
         but events instead of Rich output, and cancellable between/inside rounds)."""
         task.status = taskstore.STATUS_RUNNING
@@ -308,7 +331,8 @@ class Session:
                                      filter_file=task.filter_file,
                                      log_file=task.log_file,
                                      on_progress=on_progress,
-                                     on_start=set_proc)
+                                     on_start=set_proc,
+                                     update=update)
                 self._rclone_proc = None
                 if self._cancel.is_set():
                     break

@@ -100,3 +100,11 @@ def latest_incomplete() -> MigrationTask | None:
     if not candidates:
         return None
     return max(candidates, key=lambda t: t.updated_at)
+
+
+def latest_task() -> MigrationTask | None:
+    """Most recent task regardless of status (sync re-runs done tasks)."""
+    tasks = all_tasks()
+    if not tasks:
+        return None
+    return max(tasks, key=lambda t: t.updated_at)

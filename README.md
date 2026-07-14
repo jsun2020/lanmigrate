@@ -61,7 +61,19 @@ python -m lanmigrate send D:\projects
 - 恢复:`python -m lanmigrate resume`(换了 Wi-Fi/IP 也能自动找回设备)
 - 全自动循环重跑,直到所有文件成功才停(被占用的文件下一轮自动补传)
 
-### 3. 其他命令
+### 3. 过渡期增量同步
+
+两台电脑同时使用期间,旧电脑上又改了一些文件?
+
+```
+python -m lanmigrate sync                # 重跑最近的迁移任务,只传有变化的文件
+```
+
+安全语义:新电脑上更新过的文件**不会被覆盖**(--update,按修改时间判断),
+接收端的文件**不会被删除**。GUI 首页的"增量同步"卡片一键完成同样操作。
+(接收端照常运行 receive 即可,配对码不变。)
+
+### 4. 其他命令
 
 ```
 python -m lanmigrate tasks               # 查看所有迁移任务

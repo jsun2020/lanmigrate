@@ -109,6 +109,53 @@ async function refreshResumeBanner() {
       $("resume-banner").classList.add("hidden");
     }
   } catch { /* banner is best-effort */ }
+  refreshSyncList();
+}
+
+async function refreshSyncList() {
+  try {
+    const { tasks } = await call("list_tasks");
+    // one row per unique source->destination, newest first, done tasks only
+    const seen = new Set();
+    const rows = tasks
+      .filter((t) => t.status === "done")
+      .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
+      .filter((t) => {
+        const key = `${t.source}|${t.host}|${t.dest}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 5);
+    const list = $("sync-list");
+    list.innerHTML = "";
+    if (!rows.length) { $("sync-section").classList.add("hidden"); return; }
+    rows.forEach((t) => {
+      const item = document.createElement("div");
+      item.className = "sync-item";
+      const src = document.createElement("span");
+      src.className = "src";
+      src.textContent = t.source;
+      const dst = document.createElement("span");
+      dst.className = "dst";
+      dst.textContent = `-> ${t.host}:${t.port}`;
+      const btn = document.createElement("button");
+      btn.textContent = "同步更新";
+      btn.onclick = () => doSync(t.task_id);
+      item.append(src, dst, btn);
+      list.appendChild(item);
+    });
+    $("sync-section").classList.remove("hidden");
+  } catch { /* best-effort */ }
+}
+
+async function doSync(taskId) {
+  try {
+    const { task } = await call("sync", { task_id: taskId });
+    openProgress(`${task.source} -> ${task.host}:${task.port}`, "正在同步…(只传输有变化的文件)");
+  } catch (e) {
+    toast("同步启动失败: " + e.message);
+  }
 }
 
 on("status", (m) => { $("home-status").textContent = m.msg; toast(m.msg); });
@@ -313,7 +360,7 @@ $("btn-start-send").onclick = async () => {
 
 // ------------------------------------------------------------ progress
 
-function openProgress(taskLabel) {
+function openProgress(taskLabel, title) {
   $("progress-task").textContent = taskLabel;
   $("progress-bar").style.width = "0%";
   $("progress-bar").classList.add("indeterminate");
@@ -323,7 +370,7 @@ function openProgress(taskLabel) {
   $("stat-files").textContent = "-";
   $("stat-round").textContent = "1";
   $("progress-current").textContent = "";
-  $("progress-title").textContent = "正在迁移…";
+  $("progress-title").textContent = title || "正在迁移…";
   show("screen-progress");
 }
 

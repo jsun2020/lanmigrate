@@ -172,7 +172,8 @@ def _pick_receiver(host: Optional[str], port: int) -> tuple[str, int, str]:
     return chosen.host, chosen.port, chosen.fingerprint
 
 
-def _run_task(task: taskstore.MigrationTask, max_rounds: int, wait: int) -> None:
+def _run_task(task: taskstore.MigrationTask, max_rounds: int, wait: int,
+              update: bool = False) -> None:
     """Unattended transfer loop: rerun rclone until exit code 0 (PRD F2)."""
     task.status = taskstore.STATUS_RUNNING
     taskstore.save(task)
@@ -205,7 +206,8 @@ def _run_task(task: taskstore.MigrationTask, max_rounds: int, wait: int) -> None
                 rc = engine.run_copy(Path(task.source), remote,
                                      filter_file=task.filter_file,
                                      log_file=task.log_file,
-                                     on_progress=on_progress)
+                                     on_progress=on_progress,
+                                     update=update)
             task.rounds_completed = rnd
             taskstore.save(task)
 
@@ -309,6 +311,18 @@ def send(
 # ---------------------------------------------------------------- resume
 
 
+def _rediscover(task: taskstore.MigrationTask) -> None:
+    """IP 可能已变化: 若当初通过 mDNS 配对,按设备指纹重新发现 (PRD F1/F4)。"""
+    if not task.device_fp:
+        return
+    for r in discovery.discover(timeout=5.0):
+        if r.fingerprint == task.device_fp and (r.host, r.port) != (task.host, task.port):
+            console.print(f"  设备 IP 已变化: {task.host} -> {r.host}")
+            task.host, task.port = r.host, r.port
+            taskstore.save(task)
+            break
+
+
 @app.command()
 def resume(
     task_id: Optional[str] = typer.Argument(None, help="任务 ID,默认最近一个未完成任务"),
@@ -321,16 +335,29 @@ def resume(
         console.print("没有未完成的任务。")
         raise typer.Exit(0)
     console.print(f"[cyan]恢复任务 {task.task_id}: {task.source} -> {task.host}:{task.port}[/]")
-
-    # IP 可能已变化: 若当初通过 mDNS 配对,按设备指纹重新发现 (PRD F1/F4)
-    if task.device_fp:
-        for r in discovery.discover(timeout=5.0):
-            if r.fingerprint == task.device_fp and (r.host, r.port) != (task.host, task.port):
-                console.print(f"  设备 IP 已变化: {task.host} -> {r.host}")
-                task.host, task.port = r.host, r.port
-                taskstore.save(task)
-                break
+    _rediscover(task)
     _run_task(task, max_rounds, wait)
+
+
+@app.command()
+def sync(
+    task_id: Optional[str] = typer.Argument(None, help="任务 ID,默认最近一个任务(含已完成)"),
+    max_rounds: int = typer.Option(100, help="最大自动重跑轮数"),
+    wait: int = typer.Option(60, help="每轮之间等待秒数"),
+) -> None:
+    """增量同步:重跑一个(已完成的)迁移任务,只传输有变化的文件。
+
+    过渡期两台电脑同时使用的场景 (PRD F9):新电脑上更新过的文件不会被
+    覆盖(--update),接收端多出来的文件也不会被删除。"""
+    task = taskstore.load(task_id) if task_id else taskstore.latest_task()
+    if task is None:
+        console.print("没有可同步的任务,请先执行一次 lanmigrate send。")
+        raise typer.Exit(0)
+    console.print(f"[cyan]增量同步 {task.task_id}: {task.source} -> {task.host}:{task.port}[/]")
+    console.print("  只传输有变化的文件;新电脑上更新过的文件不会被覆盖")
+    _rediscover(task)
+    task.rounds_completed = 0  # fresh pass over the whole tree
+    _run_task(task, max_rounds, wait, update=True)
 
 
 # ---------------------------------------------------------------- tasks

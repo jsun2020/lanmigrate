@@ -53,6 +53,26 @@ def test_build_copy_cmd_baseline_flags():
         assert flag in joined, flag
 
 
+def test_build_copy_cmd_update_mode():
+    base = engine.build_copy_cmd(Path("rclone.exe"), Path("D:/s"), ":sftp:/")
+    assert "--update" not in base  # migration mode: source always wins
+    sync = engine.build_copy_cmd(Path("rclone.exe"), Path("D:/s"), ":sftp:/",
+                                 update=True)
+    assert "--update" in sync  # sync mode: newer receiver files preserved
+
+
+def test_latest_task_includes_done(tmp_path, monkeypatch):
+    from lanmigrate import taskstore
+    monkeypatch.setattr(taskstore, "TASKS_DIR", tmp_path / "tasks")
+    assert taskstore.latest_task() is None
+    done = taskstore.MigrationTask(
+        task_id="t-old", source="s", host="h", port=1, user="u",
+        obscured_pass="p", status=taskstore.STATUS_DONE)
+    taskstore.save(done)
+    assert taskstore.latest_task().task_id == "t-old"
+    assert taskstore.latest_incomplete() is None  # resume still skips done
+
+
 def test_sftp_remote_string():
     r = engine.sftp_remote("192.168.1.8", 2022, "lanmigrate", "OBSC", "/")
     assert r == ":sftp,host=192.168.1.8,port=2022,user=lanmigrate,pass=OBSC:/"

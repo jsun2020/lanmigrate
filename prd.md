@@ -5,6 +5,37 @@
 
 ---
 
+## Version Update: v0.4.0 - 2026-07-14
+
+### Feature Summary
+增量同步(F9):过渡期两台电脑同时使用时,一键重跑历史迁移任务,只传输有变化的文件。
+
+### Business Value
+用户反馈:相同文件夹在新旧电脑各有一份,过渡期只需同步"确实修改过的那一小部分文件"。rclone 引擎本身就按 大小+修改时间 跳过未变化的文件,缺的是(1)重跑已完成任务的入口(resume 只认未完成任务),(2)安全语义。
+
+### Solution Overview
+- CLI 新增 `lanmigrate sync [TASK_ID]`(默认最近一个任务,含已完成);GUI 首页新增"增量同步"卡片,列出历史任务(按 源->目标 去重,最多 5 条),一键同步
+- 同步模式在 rclone 命令中加 `--update`:**新电脑上更新过(更新的修改时间)的文件永不被覆盖**;仍是 copy 语义,**接收端文件永不被删除**
+- 复用任务持久化:filter 规则、设备指纹(IP 变化自动重发现)、配对凭据全部来自原任务,同步无需重新扫描/配对
+
+### Affected Components
+| Component | Change Type | Description |
+|-----------|-------------|-------------|
+| engine.py | Modified | build_copy_cmd/run_copy 增加 update 开关(--update) |
+| taskstore.py | Modified | 新增 latest_task()(含已完成任务) |
+| cli.py | Modified | 新增 sync 命令;抽出 _rediscover 复用 |
+| ipc.py | Modified | 新增 sync 方法(worker 线程带 update 标志) |
+| gui/ui | Modified | 首页增量同步卡片 + 同步进度标题 |
+| scanner/discovery/pairing | No Change | 同步复用既有任务的 filter/指纹/凭据 |
+
+### Acceptance Criteria
+- [x] 环回 e2e:初次迁移 4.2MB 后改动两侧文件,sync 仅传 43 字节;旧机改动已同步、新机较新的编辑未被覆盖、接收端多余文件未被删除、未变化的 4MB 大文件未重传
+- [x] resume 语义不变(仍只认未完成任务);sync 认任意任务并重置轮次
+- [x] 全部测试通过(40 个,新增 4 个)
+- [ ] 用户双机实测过渡期同步
+
+---
+
 ## Version Update: v0.3.0 - 2026-07-14
 
 ### Feature Summary
