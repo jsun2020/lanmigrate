@@ -10,6 +10,10 @@
 
 ## 桌面版(推荐,Windows)
 
+**直接下载**:[Releases](https://github.com/jsun2020/lanmigrate/releases) 提供
+安装包(`LanMigrate_x.y.z_x64-setup.exe`)、免安装 zip 和命令行单文件 exe,
+由 GitHub Actions 自动构建(推 `v*` 标签即出新版,附 SHA-256 校验)。
+
 `gui/` 是 Tauri 桌面应用:双击运行,首页选"发送"或"接收",按提示操作即可,
 无需命令行。所有传输逻辑与 CLI 完全一致(同一套 Python 模块)。
 
