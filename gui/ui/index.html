@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LanMigrate</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">&#8646;</span>
+      <span class="title">LanMigrate</span>
+      <span class="subtitle">局域网迁移 · 可中断续传 · 自动跳过依赖目录</span>
+    </div>
+    <span id="version" class="version"></span>
+  </header>
+
+  <main>
+    <!-- ============================================== home -->
+    <section id="screen-home" class="screen">
+      <div id="resume-banner" class="banner hidden">
+        <div>
+          <b>发现未完成的任务</b>
+          <div id="resume-info" class="dim"></div>
+        </div>
+        <button id="btn-resume" class="primary">继续传输</button>
+      </div>
+
+      <div class="cards">
+        <div class="card" id="card-send">
+          <div class="card-icon">&#8613;</div>
+          <h2>发送(旧电脑)</h2>
+          <p>选择要迁移的文件夹,自动发现接收端,输入配对码即刻开始。</p>
+        </div>
+        <div class="card" id="card-receive">
+          <div class="card-icon">&#8615;</div>
+          <h2>接收(新电脑)</h2>
+          <p>选择接收文件夹后显示 6 位配对码,等待对方连接。</p>
+        </div>
+      </div>
+      <div id="home-status" class="status-line"></div>
+    </section>
+
+    <!-- ============================================== receive -->
+    <section id="screen-receive" class="screen hidden">
+      <h2>接收模式</h2>
+      <div id="receive-wait" class="center-box">
+        <div class="hint">接收到的文件将保存到:</div>
+        <div id="receive-dir" class="path"></div>
+        <div class="row">
+          <button id="btn-receive-dir">更换文件夹…</button>
+          <button id="btn-receive-start" class="primary">开始接收</button>
+        </div>
+      </div>
+      <div id="receive-active" class="center-box hidden">
+        <div class="hint">在发送端输入此配对码:</div>
+        <div id="pair-code" class="paircode"></div>
+        <div class="dim">本机地址 <span id="receive-ip"></span> · 保存到 <span id="receive-dir2"></span></div>
+        <div id="receive-mdns" class="dim"></div>
+        <div class="note">等待发送端连接…窗口保持打开即可。中断后重新开始接收,发送端会自动续传。</div>
+        <button id="btn-receive-stop" class="danger">停止接收</button>
+      </div>
+      <div class="footer-row"><button class="linkish btn-home">&#8592; 返回首页</button></div>
+    </section>
+
+    <!-- ============================================== send: pick + scan -->
+    <section id="screen-send" class="screen hidden">
+      <h2>发送模式</h2>
+
+      <div id="send-step-pick" class="step">
+        <div class="hint">第 1 步 / 共 3 步 · 选择要迁移的文件夹</div>
+        <div class="row">
+          <div id="send-source" class="path grow">尚未选择</div>
+          <button id="btn-send-pick" class="primary">选择文件夹…</button>
+        </div>
+        <div id="scan-status" class="status-line"></div>
+      </div>
+
+      <div id="send-step-exclude" class="step hidden">
+        <div class="hint">第 2 步 / 共 3 步 · 确认要跳过的依赖目录(可重新生成,无需迁移)</div>
+        <div id="exclude-summary" class="dim"></div>
+        <div id="exclude-list" class="exclude-list"></div>
+        <div class="footer-row">
+          <button id="btn-rescan" class="linkish">重新选择文件夹</button>
+          <button id="btn-exclude-next" class="primary">下一步:选择接收设备</button>
+        </div>
+      </div>
+
+      <div id="send-step-device" class="step hidden">
+        <div class="hint">第 3 步 / 共 3 步 · 选择接收设备并输入配对码</div>
+        <div id="device-list" class="device-list"></div>
+        <div class="row">
+          <button id="btn-rediscover">重新搜索</button>
+          <span class="dim">找不到设备?手动输入:</span>
+          <input id="manual-host" placeholder="接收端 IP" size="14" />
+          <input id="manual-port" value="2022" size="5" />
+        </div>
+        <div class="row">
+          <label>配对码(对方屏幕上的 6 位数字)</label>
+          <input id="pair-input" maxlength="6" inputmode="numeric" placeholder="000000" />
+          <button id="btn-start-send" class="primary big">开始迁移</button>
+        </div>
+        <div id="device-status" class="status-line"></div>
+      </div>
+
+      <div class="footer-row"><button class="linkish btn-home">&#8592; 返回首页</button></div>
+    </section>
+
+    <!-- ============================================== progress -->
+    <section id="screen-progress" class="screen hidden">
+      <h2 id="progress-title">正在迁移…</h2>
+      <div class="dim" id="progress-task"></div>
+      <div class="progress-outer"><div id="progress-bar" class="progress-inner"></div></div>
+      <div class="stats-row">
+        <div class="stat"><div id="stat-bytes" class="stat-v">-</div><div class="stat-k">已传输</div></div>
+        <div class="stat"><div id="stat-speed" class="stat-v">-</div><div class="stat-k">速度</div></div>
+        <div class="stat"><div id="stat-eta" class="stat-v">-</div><div class="stat-k">剩余时间</div></div>
+        <div class="stat"><div id="stat-files" class="stat-v">-</div><div class="stat-k">文件</div></div>
+        <div class="stat"><div id="stat-round" class="stat-v">1</div><div class="stat-k">轮次</div></div>
+      </div>
+      <div id="progress-current" class="dim ellipsis"></div>
+      <div id="progress-note" class="note">随时可以关闭或取消:任务已保存,之后点"继续传输"即从断点续传。</div>
+      <div class="footer-row">
+        <button id="btn-cancel-send" class="danger">暂停并退出</button>
+      </div>
+    </section>
+
+    <!-- ============================================== done -->
+    <section id="screen-done" class="screen hidden">
+      <div class="center-box">
+        <div id="done-icon" class="done-icon">&#10003;</div>
+        <h2 id="done-title">迁移完成!</h2>
+        <div id="done-detail" class="dim"></div>
+        <button class="primary btn-home">返回首页</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="main.js"></script>
+</body>
+</html>

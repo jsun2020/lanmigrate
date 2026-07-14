@@ -7,12 +7,23 @@ is PRD Appendix B.3 (verified in the M0 manual run). Progress is parsed from
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
 from .rclone_bin import ensure_rclone
+
+# Set by the GUI sidecar (ipc.py): the app has no console, so child rclone
+# processes must not pop console windows of their own.
+GUI_MODE = False
+
+
+def _popen_extra() -> dict:
+    if GUI_MODE and os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
 
 # Baseline copy flags = PRD B.3. Unattended by design: non-interactive,
 # retries handle network blips, --skip-links avoids junction loops.
@@ -82,6 +93,7 @@ def obscure(password: str) -> str:
     out = subprocess.run(
         [str(rclone), "obscure", password],
         capture_output=True, text=True, check=True, encoding="utf-8",
+        **_popen_extra(),
     )
     return out.stdout.strip()
 
@@ -112,10 +124,12 @@ def run_copy(
     filter_file: Optional[Path] = None,
     log_file: Optional[Path] = None,
     on_progress: Optional[Callable[[Progress], None]] = None,
+    on_start: Optional[Callable[[subprocess.Popen], None]] = None,
 ) -> int:
     """Run one rclone copy round. Returns the rclone exit code (0 = every
     file transferred or already up to date). Never raises on rclone failure;
-    the caller loops until 0 (PRD F2 unattended loop)."""
+    the caller loops until 0 (PRD F2 unattended loop). `on_start` receives
+    the Popen handle so a GUI can terminate mid-round."""
     rclone = ensure_rclone()
     cmd = build_copy_cmd(rclone, source, remote, filter_file)
     log_fh = open(log_file, "a", encoding="utf-8") if log_file else None
@@ -127,8 +141,11 @@ def run_copy(
             text=True,
             encoding="utf-8",
             errors="replace",
+            **_popen_extra(),
         )
         assert proc.stderr is not None
+        if on_start:
+            on_start(proc)
         for line in proc.stderr:
             if log_fh:
                 log_fh.write(line)
@@ -153,6 +170,10 @@ def serve_sftp(directory: Path, port: int, user: str, password: str) -> subproce
         "--pass", password,
         "--vfs-cache-mode", "off",
     ]
+    if GUI_MODE:
+        # no console to inherit; keep the server quiet and windowless
+        return subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, **_popen_extra())
     return subprocess.Popen(cmd)
 
 

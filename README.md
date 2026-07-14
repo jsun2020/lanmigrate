@@ -8,7 +8,23 @@
 - 自动跳过 `node_modules` / `venv` / `target` 等依赖目录(上下文感知,只有旁边有 `package.json` 等标记文件才排除)
 - 传输引擎为 [rclone](https://rclone.org)(自动下载,无需手动安装)
 
-## 快速开始
+## 桌面版(推荐,Windows)
+
+`gui/` 是 Tauri 桌面应用:双击运行,首页选"发送"或"接收",按提示操作即可,
+无需命令行。所有传输逻辑与 CLI 完全一致(同一套 Python 模块)。
+
+```
+cd gui
+npm install
+npm run tauri build     # 产物在 gui/src-tauri/target/release/bundle/nsis/
+npm run tauri dev       # 开发模式(直接跑仓库里的 Python 代码)
+```
+
+构建需要 Rust + Node.js;发行版内置 PyInstaller 打包的后端
+(先 `pyinstaller ... entry.py` 生成 `dist/lanmigrate.exe`,
+再复制为 `gui/src-tauri/binaries/lanmigrate-x86_64-pc-windows-msvc.exe`)。
+
+## 快速开始(CLI)
 
 两台电脑都需要 Python 3.11+,克隆本仓库后:
 

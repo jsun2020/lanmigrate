@@ -5,6 +5,56 @@
 
 ---
 
+## Version Update: v0.3.0 - 2026-07-14
+
+### Feature Summary
+桌面 GUI(M3):Tauri v2 桌面应用,双击即用 — 发送/接收/续传全流程可视化,不再需要命令行。
+
+### Business Value
+用户在真实迁移中反馈"确实需要一个简单的可视化界面"(Win->Mac 单文件夹实测 146.2 分钟传输顺利,但 CLI 操作门槛高)。GUI 让非技术用户也能完成配对与迁移。
+
+### Solution Overview
+三层结构,所有迁移逻辑保持在已验证的 Python 模块中,GUI 只是外壳:
+
+```
++----------------------+       +---------------------------+
+|  Tauri (Rust shell)  |       |  Python sidecar           |
+|  webview UI [NEW]    |<----->|  lanmigrate ipc [NEW]     |
+|  gui/ui/ (HTML/JS)   | stdio |  JSON-lines 协议          |
++----------------------+ JSON  +---------------------------+
+                                     | 复用(不改动)
+                                     v
+                        scanner / discovery / pairing /
+                        taskstore / engine / rules.toml
+```
+
+- Rust 层只做进程管道(spawn sidecar、转发 stdout 行为 webview 事件、`ipc_send` 写 stdin)和文件夹选择对话框
+- 协议:请求 `{"id","method","params"}` / 应答 `{"id","ok","result"|"error"}` / 事件 `{"event",...}`(scan_progress、transfer_progress、round、send_done、receive_stopped)
+- 传输在 sidecar 工作线程运行,取消/关窗随时安全(任务已落盘,续传接续)
+- 发行版将 PyInstaller exe 作为 Tauri externalBin 打包;开发模式直接跑 `.venv` 的 `python -m lanmigrate ipc`
+
+### UI 流程
+首页(发送/接收/继续上次任务)-> 接收:选文件夹 -> 大字配对码 + IP;发送:选文件夹 -> 秒级扫描 -> 排除清单勾选 -> 设备列表(mDNS 自动发现 + 手动 IP)-> 配对码 -> 进度页(速度/剩余时间/轮次)-> 完成统计。
+
+### Affected Components
+| Component | Change Type | Description |
+|-----------|-------------|-------------|
+| lanmigrate/ipc.py | New | JSON-lines IPC 后端(Session + stdio loop) |
+| gui/ | New | Tauri 项目(src-tauri Rust 壳 + ui 静态前端) |
+| lanmigrate/engine.py | Modified | run_copy 增加 on_start 回调(GUI 取消需进程句柄);GUI_MODE 隐藏子进程窗口 |
+| lanmigrate/cli.py | Modified | 新增隐藏命令 `ipc` |
+| scanner/discovery/pairing/taskstore/rules.toml | No Change | GUI 原样调用 |
+
+### Acceptance Criteria
+- [x] 单元测试:tests/test_ipc.py(协议分发、scan、任务方法、守卫路径)全绿,既有测试无回归
+- [x] 冻结 exe `lanmigrate ipc` 协议 round-trip 通过(ping/scan/local_info/list_tasks/未知方法)
+- [x] 环回 e2e:GUI IPC 协议驱动完整传输(接收端起服务 + 发送端扫描/传输/排除生效/文件校验)
+- [x] 调试版 GUI 窗口正常打开,sidecar 随窗口退出干净关闭(无孤儿进程)
+- [x] tauri build 产出安装包,安装后可运行
+- [ ] Win-Win 双机实测(用户计划进行)
+
+---
+
 ## Version Update: v0.2.0 - 2026-07-13
 
 ### Feature Summary

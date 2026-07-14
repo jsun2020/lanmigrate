@@ -352,5 +352,16 @@ def tasks() -> None:
     console.print(table)
 
 
+# ---------------------------------------------------------------- ipc (GUI)
+
+
+@app.command(hidden=True)
+def ipc() -> None:
+    """(内部) 桌面 GUI 后端:stdin/stdout JSON-lines 协议。"""
+    from . import ipc as ipc_mod
+
+    ipc_mod.run_stdio()
+
+
 if __name__ == "__main__":
     app()
