@@ -24,7 +24,8 @@ jobs:
       - name: Install Python deps and run tests
         run: |
           python -m pip install --upgrade pip
-          pip install typer rich zeroconf pytest pyinstaller
+          pip install -e .
+          pip install pytest pyinstaller
           pytest -q
 
       - name: Build Python sidecar (PyInstaller)
