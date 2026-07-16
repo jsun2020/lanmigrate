@@ -90,16 +90,20 @@ class Session:
         return {"version": __version__}
 
     def ipc_prepare(self) -> dict:
-        """Locate rclone; download on first run (the GUI shows the status)."""
-        from . import rclone_bin
+        """Locate rclone (bundled builds install it locally, no download);
+        download only as a last resort. Reports admin status so the GUI can
+        show the standard-user firewall hint (PRD F11)."""
+        from . import preflight, rclone_bin
 
         found = rclone_bin.find_rclone()
-        if found:
-            return {"rclone": str(found), "downloaded": False}
-        self._emit({"event": "status",
-                    "msg": "首次运行: 正在下载 rclone(约 25MB,需 1~3 分钟)…"})
-        path = rclone_bin.download_rclone()
-        return {"rclone": str(path), "downloaded": True}
+        downloaded = False
+        if not found:
+            self._emit({"event": "status",
+                        "msg": "首次运行: 正在下载 rclone(约 25MB,需 1~3 分钟)…"})
+            found = rclone_bin.download_rclone()
+            downloaded = True
+        return {"rclone": str(found), "downloaded": downloaded,
+                "admin": preflight.is_admin()}
 
     def ipc_local_info(self) -> dict:
         return {
@@ -159,8 +163,20 @@ class Session:
 
     def ipc_start_receive(self, directory: str, port: int = 2022,
                           code: Optional[str] = None) -> dict:
+        from . import preflight
+
         if self._receive_proc is not None and self._receive_proc.poll() is None:
             raise IpcError("接收服务已在运行")
+        if not preflight.port_available(port):
+            raise IpcError(f"端口 {port} 已被占用,请先关闭占用它的程序")
+        # PRD F11: elevated -> create the inbound allow rule automatically;
+        # standard user -> tell the GUI so it can show guidance.
+        if preflight.is_admin():
+            firewall_ok, firewall_msg = preflight.ensure_firewall_rule(port)
+        else:
+            firewall_ok = preflight.firewall_rule_exists(port)
+            firewall_msg = ("" if firewall_ok
+                            else "标准用户:防火墙可能拦截发送端的连接")
         target = Path(directory).expanduser()
         target.mkdir(parents=True, exist_ok=True)
         code = code or pairing.generate_code()
@@ -179,7 +195,8 @@ class Session:
         threading.Thread(target=self._watch_receive,
                          args=(self._receive_proc,), daemon=True).start()
         return {"code": code, "ip": discovery.local_ip(), "port": port,
-                "directory": str(target), "mdns": mdns}
+                "directory": str(target), "mdns": mdns,
+                "firewall_ok": firewall_ok, "firewall_msg": firewall_msg}
 
     def _watch_receive(self, proc) -> None:
         rc = proc.wait()

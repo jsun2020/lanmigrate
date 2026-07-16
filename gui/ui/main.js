@@ -187,6 +187,14 @@ $("btn-receive-start").onclick = async () => {
     $("receive-mdns").textContent = r.mdns
       ? "已开启自动发现,发送端无需输入 IP"
       : "自动发现不可用(mDNS 被拦截),发送端请手动输入上面的 IP";
+    const fw = $("receive-firewall");
+    if (r.firewall_ok) {
+      fw.classList.add("hidden");
+    } else {
+      fw.textContent = (r.firewall_msg || "防火墙可能拦截连接")
+        + " — 若发送端连不上:让管理员运行一次本程序,或改用本机发送(发送不需要权限)";
+      fw.classList.remove("hidden");
+    }
     $("receive-wait").classList.add("hidden");
     $("receive-active").classList.remove("hidden");
   } catch (e) {

@@ -28,9 +28,18 @@ jobs:
           pip install pytest pyinstaller
           pytest -q
 
+      - name: Download rclone for bundling (PRD F10 zero-download startup)
+        run: |
+          Invoke-WebRequest https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip
+          Expand-Archive rclone.zip -DestinationPath rclone-tmp -Force
+          $rc = Get-ChildItem rclone-tmp -Recurse -Filter rclone.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force build-bin | Out-Null
+          Copy-Item $rc.FullName build-bin\rclone.exe -Force
+          & build-bin\rclone.exe version
+
       - name: Build Python sidecar (PyInstaller)
         run: |
-          pyinstaller --onefile --name lanmigrate --add-data "lanmigrate/rules.toml;lanmigrate" -y entry.py
+          pyinstaller --onefile --name lanmigrate --add-data "lanmigrate/rules.toml;lanmigrate" --add-binary "build-bin/rclone.exe;bin" -y entry.py
           New-Item -ItemType Directory -Force gui\src-tauri\binaries | Out-Null
           Copy-Item dist\lanmigrate.exe gui\src-tauri\binaries\lanmigrate-x86_64-pc-windows-msvc.exe -Force
 

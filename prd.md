@@ -5,6 +5,66 @@
 
 ---
 
+## Version Update: v0.5.0 - 2026-07-16
+
+### Feature Summary
+开箱即用(F10)+ 启动自检(F11):rclone 直接打包进发行版,启动零下载;启动时自动检测账户权限/端口/防火墙,管理员自动放行,标准用户给出明确指引。
+
+### Business Value
+用户反馈:把程序拷到另一台电脑后,启动还要联网下载组件;目标电脑没有管理员权限或下载失败时,连接无法建立,体验差。
+
+### 事实核查(设计依据)
+1. typer/rich/zeroconf 等 Python 依赖 **早已打包**在 PyInstaller exe 内,从不下载 —— 该痛点只发生在"拷贝源码目录"的用法上,正确姿势是使用 Releases 成品。启动时唯一真实的下载是 rclone.exe(~25MB),本版本将其打进包内,彻底消除。
+2. SFTP 本就全程运行在用户态:端口 2022 > 1024 无需管理员即可监听,`~/.lanmigrate` 是用户目录。**标准账户真正的障碍只有一个:Windows 防火墙的入站放行规则(仅影响接收端;发送端只有出站连接,任何权限都不受影响)。**
+3. 因此"标准用户改走 HTTP"**不成立**:HTTP 监听器被防火墙拦截的方式与 SFTP 完全相同,权限要求毫无差别,只会让协议面翻倍 —— 判定为 Out of Scope。正确做法是自检 + 自动放行 + 指引(含"交换方向"兜底:让受限电脑做发送端)。
+
+### Solution Overview
+```
+启动 (CLI receive / GUI prepare)
+        |
+        v
++--------------------+  打包内 rclone -> 复制一次到 ~/.lanmigrate/bin
+| rclone_bin [MOD]   |  (onefile 每次解压到新临时目录,固定路径才能
+| env>bundled>PATH   |   让防火墙规则跨启动有效)
++--------------------+
+        |
+        v
++--------------------+  管理员   -> netsh 自动添加放行规则 (LanMigrate-2022)
+| preflight.py [NEW] |  标准用户 -> 明确提示 + 三条出路:
+| is_admin/port/     |    1) 管理员运行一次  2) netsh 单条命令
+| firewall check     |    3) 交换方向(发送端不需要任何权限)
++--------------------+
+```
+
+### Affected Components
+| Component | Change Type | Description |
+|-----------|-------------|-------------|
+| preflight.py | New | is_admin/port_available/rclone_source/防火墙检测与放行/check 报告 |
+| rclone_bin.py | Modified | 打包内 rclone 自动安装到 ~/.lanmigrate/bin 固定路径 |
+| cli.py | Modified | 新增 doctor 自检命令;receive 启动时端口检查 + 防火墙自动放行/指引 |
+| ipc.py | Modified | prepare 返回 admin/来源;start_receive 返回 firewall_ok/firewall_msg |
+| gui/ui | Modified | 接收界面标准用户防火墙提示条 |
+| build-release.yml | Modified | CI 构建时下载 rclone 并 --add-binary 打入 exe |
+| engine/scanner/discovery/pairing/taskstore | No Change | 传输路径零改动 |
+
+### Key Implementation Points
+1. 防火墙规则按端口命名(LanMigrate-2022)且 port-scoped 而非 program-scoped:与哪份 rclone 在服务无关,幂等可重复执行
+2. 打包内 rclone 安装到固定路径而非直接从解压临时目录运行:onefile 每次启动路径都变,程序级防火墙弹窗/规则会每次重来
+3. exe 体积 14MB -> 42MB(rclone ~28MB),换来零下载、零网络依赖启动
+
+### Out of Scope
+- HTTP 传输协议(见事实核查 3:对权限要求无任何改善)
+- 便携版"绿色解压即用"的 rclone 外置目录(bundled 安装已覆盖)
+
+### Acceptance Criteria
+- [x] 冷机模拟:删除 ~/.lanmigrate/bin/rclone.exe 且 PATH 无 rclone,冻结 exe 运行 doctor 10.6s 内就绪,自装副本与打包副本哈希一致,零下载
+- [x] doctor 幂等:管理员首次运行自动添加 LanMigrate-2022 放行规则(netsh 验证 Allow/TCP/2022),再次运行报告"已放行"
+- [x] 标准用户路径:receive/GUI 显示三条出路指引,不再只给一条需要管理员的命令
+- [x] 全部测试通过(55 个,新增 15 个)
+- [ ] 用户在无管理员权限的电脑上实测接收/发送
+
+---
+
 ## Version Update: v0.4.0 - 2026-07-14
 
 ### Feature Summary

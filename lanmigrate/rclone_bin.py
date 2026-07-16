@@ -32,13 +32,38 @@ def _bundled_dir() -> Path | None:
     return Path(base) / "bin" if base else None
 
 
+def _install_bundled() -> Path | None:
+    """Copy the build-time bundled rclone to ~/.lanmigrate/bin once.
+
+    One-file builds extract to a fresh temp dir on every launch, so serving
+    from the extracted path would invalidate any firewall rule keyed to the
+    exe path. A stable copy fixes that and survives app uninstalls."""
+    bundled = _bundled_dir()
+    if not bundled:
+        return None
+    src = bundled / _exe_name()
+    if not src.is_file():
+        return None
+    target = default_bin_dir() / _exe_name()
+    if target.is_file():
+        return target
+    try:
+        default_bin_dir().mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, target)
+        if os.name != "nt":
+            target.chmod(0o755)
+        return target
+    except OSError:
+        return src  # home not writable: run from the extracted copy
+
+
 def find_rclone() -> Path | None:
     env = os.environ.get("LANMIGRATE_RCLONE")
     if env and Path(env).is_file():
         return Path(env)
-    bundled = _bundled_dir()
-    if bundled and (bundled / _exe_name()).is_file():
-        return bundled / _exe_name()
+    installed = _install_bundled()
+    if installed:
+        return installed
     which = shutil.which("rclone")
     if which:
         return Path(which)

@@ -31,6 +31,31 @@ def test_ping(session):
     assert reply["result"]["version"]
 
 
+def test_prepare_reports_admin_without_download(session, monkeypatch, tmp_path):
+    """With rclone already present (bundled/local), prepare never downloads
+    and reports the admin flag for the GUI hint (PRD F10/F11)."""
+    from lanmigrate import rclone_bin
+
+    exe = tmp_path / "rclone.exe"
+    exe.write_bytes(b"MZ")
+    monkeypatch.setattr(rclone_bin, "find_rclone", lambda: exe)
+    reply = call(session, "prepare")
+    assert reply["ok"] is True
+    r = reply["result"]
+    assert r["downloaded"] is False
+    assert isinstance(r["admin"], bool)
+
+
+def test_start_receive_rejects_busy_port(session, monkeypatch):
+    from lanmigrate import preflight
+
+    monkeypatch.setattr(preflight, "port_available", lambda port: False)
+    reply = call(session, "start_receive",
+                 {"directory": "~/Migration", "port": 2022})
+    assert reply["ok"] is False
+    assert "被占用" in reply["error"]
+
+
 def test_unknown_method(session):
     reply = call(session, "no_such_method")
     assert reply["ok"] is False

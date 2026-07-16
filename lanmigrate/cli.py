@@ -23,7 +23,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from . import __version__, discovery, engine, pairing, scanner, taskstore
+from . import __version__, discovery, engine, pairing, preflight, scanner, taskstore
 
 app = typer.Typer(add_completion=False, help="局域网断点续传迁移工具 (LAN migration with resume)")
 console = Console()
@@ -87,8 +87,22 @@ def receive(
     console.print(f"\n  配对码(在发送端输入): [bold yellow]{code}[/]\n")
     console.print("  发送端命令: lanmigrate send <源目录>")
     console.print(f"  (若自动发现失败,发送端加参数 --host {discovery.local_ip()} --port {port})")
-    console.print("  [dim]Windows 若连不上,请以管理员放行防火墙端口:")
-    console.print(f"  [dim]New-NetFirewallRule -DisplayName LanMigrate -Direction Inbound -LocalPort {port} -Protocol TCP -Action Allow[/]")
+
+    # PRD F11: receiving needs an inbound firewall rule on Windows; that is
+    # the ONLY step that wants admin. Fix it automatically when elevated,
+    # otherwise say exactly what to do.
+    if not preflight.port_available(port):
+        console.print(f"[red]端口 {port} 已被占用,请换一个端口(--port)。[/]")
+        raise typer.Exit(1)
+    if preflight.is_admin():
+        ok, msg = preflight.ensure_firewall_rule(port)
+        console.print(f"  {msg}" if ok else f"  [yellow]{msg}[/]")
+    elif not preflight.firewall_rule_exists(port):
+        console.print("  [yellow]当前是标准用户:Windows 防火墙可能拦截发送端的连接。[/]")
+        console.print("  [dim]若发送端连不上,任选其一:")
+        console.print("  [dim]  1. 让管理员以管理员身份运行一次本命令(会自动放行)")
+        console.print(f"  [dim]  2. 管理员执行: netsh advfirewall firewall add rule name=LanMigrate-{port} dir=in action=allow protocol=TCP localport={port}")
+        console.print("  [dim]  3. 交换方向: 在这台电脑上执行发送(发送端不需要任何权限)[/]")
 
     announcer = None
     if mdns:
@@ -377,6 +391,38 @@ def tasks() -> None:
         table.add_row(t.task_id, t.status, t.source, f"{t.host}:{t.port}",
                       str(t.rounds_completed), t.updated_at)
     console.print(table)
+
+
+# ---------------------------------------------------------------- doctor
+
+
+@app.command()
+def doctor(port: int = typer.Option(2022, help="接收端口(检查端口占用与防火墙)")) -> None:
+    """环境自检:rclone 来源、账户权限、端口、防火墙(PRD F11)。"""
+    report = preflight.check(port)
+    source_label = {
+        "local": "已就绪,无需下载 (~/.lanmigrate/bin)",
+        "env": f"环境变量 LANMIGRATE_RCLONE ({report['rclone']})",
+        "path": f"系统 PATH ({report['rclone']})",
+        "missing": "未找到(首次收发时自动下载 ~25MB)",
+    }[report["rclone_source"]]
+    table = Table(title=f"LanMigrate v{__version__} 环境自检")
+    table.add_column("检查项")
+    table.add_column("结果")
+    table.add_row("rclone 引擎", source_label)
+    table.add_row("账户权限", "管理员" if report["admin"] else "标准用户")
+    table.add_row(f"端口 {port}", "可用" if report["port_free"] else "[red]被占用[/]")
+    table.add_row("防火墙放行规则",
+                  "已放行" if report["firewall_rule"]
+                  else "[yellow]未放行(仅影响接收端)[/]")
+    console.print(table)
+    if not report["firewall_rule"]:
+        if report["admin"]:
+            ok, msg = preflight.ensure_firewall_rule(port)
+            console.print(f"  {msg}" if ok else f"  [red]{msg}[/]")
+        else:
+            console.print("  [dim]标准用户无法放行防火墙。发送不受影响;"
+                          "接收前让管理员运行一次 receive 或 doctor 即可。[/]")
 
 
 # ---------------------------------------------------------------- ipc (GUI)
