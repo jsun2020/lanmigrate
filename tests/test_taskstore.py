@@ -65,6 +65,24 @@ def test_corrupt_task_file_is_skipped():
     assert len(taskstore.all_tasks()) == 1
 
 
+def test_old_task_file_without_conflict_field_loads(tmp_path):
+    """v0.5-era task JSONs have no 'conflict' key: must load with the
+    default (overwrite) so resume of old tasks keeps working (PRD F12)."""
+    task = make_task(task_id="20260101-000000-cccccc")
+    path = taskstore.save(task)
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    del data["conflict"]
+    Path(path).write_text(json.dumps(data), encoding="utf-8")
+    loaded = taskstore.load(task.task_id)
+    assert loaded.conflict == "overwrite"
+
+
+def test_conflict_mode_round_trips():
+    task = make_task(task_id="20260101-000000-dddddd", conflict="keep-both")
+    taskstore.save(task)
+    assert taskstore.load(task.task_id).conflict == "keep-both"
+
+
 def test_unique_task_ids():
     ids = {taskstore.new_task_id() for _ in range(20)}
     assert len(ids) == 20

@@ -165,12 +165,56 @@ def test_sync_reruns_done_task_in_update_mode(session, tmp_path, monkeypatch):
     sess, _events = session
     started = {}
 
-    def fake_worker(t, max_rounds, wait, update=False):
-        started.update(task=t, update=update)
+    def fake_worker(t, max_rounds, wait):
+        started.update(task=t)
 
     monkeypatch.setattr(sess, "_start_worker", fake_worker)
     reply = call(session, "sync")
     assert reply["ok"] is True
     assert reply["result"]["task"]["task_id"] == "t-done"
-    assert started["update"] is True
+    assert started["task"].conflict == "update"  # sync = update semantics
     assert started["task"].rounds_completed == 0  # fresh pass
+
+
+def test_check_dest_reports_overlap(session, tmp_path, monkeypatch):
+    """Names present on both sides are returned; conflict=true (PRD F12)."""
+    from lanmigrate import engine
+
+    (tmp_path / "Documents").mkdir()
+    (tmp_path / "Photos").mkdir()
+    (tmp_path / "only-local.txt").write_text("x")
+    monkeypatch.setattr(engine, "obscure", lambda pw: "OBSC")
+    monkeypatch.setattr(engine, "list_remote",
+                        lambda remote: ["Documents", "Photos", "only-remote"])
+    reply = call(session, "check_dest",
+                 {"host": "10.0.0.2", "code": "123456", "source": str(tmp_path)})
+    assert reply["ok"] is True
+    r = reply["result"]
+    assert r["conflict"] is True
+    assert r["existing"] == ["Documents", "Photos"]
+
+
+def test_check_dest_fails_open_on_probe_error(session, tmp_path, monkeypatch):
+    """A broken probe must never block a migration: conflict=false + error."""
+    from lanmigrate import engine
+
+    monkeypatch.setattr(engine, "obscure", lambda pw: "OBSC")
+
+    def boom(remote):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(engine, "list_remote", boom)
+    reply = call(session, "check_dest",
+                 {"host": "10.0.0.2", "code": "123456", "source": str(tmp_path)})
+    assert reply["ok"] is True
+    r = reply["result"]
+    assert r["conflict"] is False
+    assert "connection refused" in r["error"]
+
+
+def test_start_send_rejects_unknown_conflict(session):
+    reply = call(session, "start_send",
+                 {"source": "C:/x", "host": "1.2.3.4", "code": "123456",
+                  "conflict": "ask"})
+    assert reply["ok"] is False
+    assert "同名文件处理" in reply["error"]

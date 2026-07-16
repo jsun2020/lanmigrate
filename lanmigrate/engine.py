@@ -10,10 +10,18 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
 from .rclone_bin import ensure_rclone
+
+# Same-name conflict handling (PRD F12). All three are still `rclone copy`:
+# receiver-side files are NEVER deleted, identical files are always skipped.
+CONFLICT_OVERWRITE = "overwrite"  # source wins where content differs (rclone default)
+CONFLICT_UPDATE = "update"        # --update: receiver-newer files are preserved
+CONFLICT_KEEP_BOTH = "keep-both"  # --suffix: receiver's version renamed, both kept
+CONFLICT_MODES = (CONFLICT_OVERWRITE, CONFLICT_UPDATE, CONFLICT_KEEP_BOTH)
 
 # Set by the GUI sidecar (ipc.py): the app has no console, so child rclone
 # processes must not pop console windows of their own.
@@ -110,16 +118,23 @@ def build_copy_cmd(
     source: Path,
     remote: str,
     filter_file: Optional[Path] = None,
-    update: bool = False,
+    conflict: str = CONFLICT_OVERWRITE,
 ) -> list[str]:
-    """`update=True` is sync mode (PRD F9): --update skips files that are
-    newer on the receiver, so edits made on the new machine during the
-    transition period are never overwritten. Deletions never propagate
-    either way (this is rclone copy, not rclone sync)."""
+    """Same-name conflict handling (PRD F9/F12). overwrite = rclone copy
+    default (source wins on differing content, identical files skipped);
+    update = --update (files newer on the receiver are never overwritten,
+    sync mode); keep-both = --suffix (the receiver's differing file is
+    renamed name-old-<timestamp>.ext before the source version lands).
+    Deletions never propagate either way (rclone copy, not rclone sync)."""
+    if conflict not in CONFLICT_MODES:
+        raise ValueError(f"unknown conflict mode: {conflict}")
     cmd = [str(rclone), "copy", str(source), remote, *BASE_COPY_FLAGS,
            "--use-json-log", "--log-level", "INFO", "--stats", STATS_INTERVAL]
-    if update:
+    if conflict == CONFLICT_UPDATE:
         cmd.append("--update")
+    elif conflict == CONFLICT_KEEP_BOTH:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        cmd += ["--suffix", f"-old-{stamp}", "--suffix-keep-extension"]
     if filter_file is not None:
         cmd += ["--filter-from", str(filter_file)]
     return cmd
@@ -132,14 +147,14 @@ def run_copy(
     log_file: Optional[Path] = None,
     on_progress: Optional[Callable[[Progress], None]] = None,
     on_start: Optional[Callable[[subprocess.Popen], None]] = None,
-    update: bool = False,
+    conflict: str = CONFLICT_OVERWRITE,
 ) -> int:
     """Run one rclone copy round. Returns the rclone exit code (0 = every
     file transferred or already up to date). Never raises on rclone failure;
     the caller loops until 0 (PRD F2 unattended loop). `on_start` receives
     the Popen handle so a GUI can terminate mid-round."""
     rclone = ensure_rclone()
-    cmd = build_copy_cmd(rclone, source, remote, filter_file, update=update)
+    cmd = build_copy_cmd(rclone, source, remote, filter_file, conflict=conflict)
     log_fh = open(log_file, "a", encoding="utf-8") if log_file else None
     try:
         proc = subprocess.Popen(
@@ -183,6 +198,21 @@ def serve_sftp(directory: Path, port: int, user: str, password: str) -> subproce
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, **_popen_extra())
     return subprocess.Popen(cmd)
+
+
+def list_remote(remote: str, timeout: int = 30) -> list[str]:
+    """Top-level entry names at the remote (PRD F12 conflict probe).
+    Directory entries come back with a trailing '/', which is stripped.
+    Raises RuntimeError on failure - callers decide whether to fail open."""
+    rclone = ensure_rclone()
+    out = subprocess.run(
+        [str(rclone), "lsf", remote, "--max-depth", "1"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=timeout, **_popen_extra(),
+    )
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip()[-300:] or f"rclone lsf exit {out.returncode}")
+    return [line.rstrip("/") for line in out.stdout.splitlines() if line.strip()]
 
 
 def check(source: Path, remote: str, filter_file: Optional[Path] = None) -> int:

@@ -44,6 +44,22 @@ main { flex: 1; overflow-y: auto; padding: 26px 34px; }
 h2 { font-size: 20px; margin-bottom: 14px; }
 .dim { color: var(--dim); font-size: 13.5px; }
 .dim.warn { color: #c47f17; }
+
+.conflict-box {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid #e0b96a;
+  border-radius: 8px;
+  background: #fdf6e7;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.conflict-title { font-weight: 600; }
+.conflict-title span { font-weight: 400; color: var(--dim); }
+.conflict-opt { display: flex; gap: 8px; align-items: flex-start; cursor: pointer;
+  font-size: 13.5px; line-height: 1.45; }
+.conflict-opt input { margin-top: 3px; }
 .note {
   margin-top: 14px; padding: 10px 14px; border-radius: 8px;
   background: #eef4ff; color: #33507e; font-size: 13.5px;

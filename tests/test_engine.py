@@ -53,12 +53,26 @@ def test_build_copy_cmd_baseline_flags():
         assert flag in joined, flag
 
 
-def test_build_copy_cmd_update_mode():
+def test_build_copy_cmd_conflict_modes():
     base = engine.build_copy_cmd(Path("rclone.exe"), Path("D:/s"), ":sftp:/")
-    assert "--update" not in base  # migration mode: source always wins
+    assert "--update" not in base and "--suffix" not in base  # overwrite = default
+
     sync = engine.build_copy_cmd(Path("rclone.exe"), Path("D:/s"), ":sftp:/",
-                                 update=True)
-    assert "--update" in sync  # sync mode: newer receiver files preserved
+                                 conflict=engine.CONFLICT_UPDATE)
+    assert "--update" in sync  # newer receiver files preserved
+
+    keep = engine.build_copy_cmd(Path("rclone.exe"), Path("D:/s"), ":sftp:/",
+                                 conflict=engine.CONFLICT_KEEP_BOTH)
+    assert "--suffix" in keep and "--suffix-keep-extension" in keep
+    suffix = keep[keep.index("--suffix") + 1]
+    assert suffix.startswith("-old-")  # receiver's version renamed, both kept
+
+
+def test_build_copy_cmd_rejects_unknown_conflict():
+    import pytest
+    with pytest.raises(ValueError):
+        engine.build_copy_cmd(Path("rclone.exe"), Path("D:/s"), ":sftp:/",
+                              conflict="ask-me")
 
 
 def test_latest_task_includes_done(tmp_path, monkeypatch):

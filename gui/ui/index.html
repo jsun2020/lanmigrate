@@ -108,6 +108,22 @@
           <input id="pair-input" maxlength="6" inputmode="numeric" placeholder="000000" />
           <button id="btn-start-send" class="primary big">开始迁移</button>
         </div>
+        <div id="conflict-box" class="conflict-box hidden">
+          <div class="conflict-title">接收端已存在同名内容:<span id="conflict-names"></span></div>
+          <div class="dim">请选择同名文件的处理方式(接收端的文件永远不会被删除):</div>
+          <label class="conflict-opt">
+            <input type="radio" name="conflict" value="overwrite" checked />
+            <span><b>覆盖</b> · 以这台(旧)电脑为准,同名但内容不同的文件被替换;完全相同的文件自动跳过,不会重传</span>
+          </label>
+          <label class="conflict-opt">
+            <input type="radio" name="conflict" value="update" />
+            <span><b>只传差异</b> · 相同的跳过;在新电脑上修改过(更新)的文件保留原样,不会被覆盖</span>
+          </label>
+          <label class="conflict-opt">
+            <input type="radio" name="conflict" value="keep-both" />
+            <span><b>两份都保留</b> · 冲突文件先把新电脑上的版本改名保留(文件名加 -old-日期 后缀),再传入这台电脑的版本</span>
+          </label>
+        </div>
         <div id="device-status" class="status-line"></div>
       </div>
 

@@ -186,9 +186,9 @@ def _pick_receiver(host: Optional[str], port: int) -> tuple[str, int, str]:
     return chosen.host, chosen.port, chosen.fingerprint
 
 
-def _run_task(task: taskstore.MigrationTask, max_rounds: int, wait: int,
-              update: bool = False) -> None:
-    """Unattended transfer loop: rerun rclone until exit code 0 (PRD F2)."""
+def _run_task(task: taskstore.MigrationTask, max_rounds: int, wait: int) -> None:
+    """Unattended transfer loop: rerun rclone until exit code 0 (PRD F2).
+    Conflict handling comes from the task itself so resume keeps the mode."""
     task.status = taskstore.STATUS_RUNNING
     taskstore.save(task)
     remote = engine.sftp_remote(task.host, task.port, task.user, task.obscured_pass, task.dest)
@@ -221,7 +221,7 @@ def _run_task(task: taskstore.MigrationTask, max_rounds: int, wait: int,
                                      filter_file=task.filter_file,
                                      log_file=task.log_file,
                                      on_progress=on_progress,
-                                     update=update)
+                                     conflict=task.conflict)
             task.rounds_completed = rnd
             taskstore.save(task)
 
@@ -254,6 +254,9 @@ def send(
     port: int = typer.Option(2022, help="接收端端口"),
     code: Optional[str] = typer.Option(None, help="接收端屏幕上的 6 位配对码"),
     dest: str = typer.Option("/", help="接收目录下的子路径"),
+    conflict: str = typer.Option(
+        "overwrite", help="同名文件处理: overwrite=以旧电脑为准覆盖 / "
+        "update=新电脑上更新过的文件保留 / keep-both=冲突文件两份都保留(旧版本加 -old 后缀)"),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过所有确认(排除建议全部采纳)"),
     full: bool = typer.Option(False, "--full", help="完整预扫描:统计体积并给出节省报告(大目录需几分钟)"),
     max_rounds: int = typer.Option(100, help="最大自动重跑轮数"),
@@ -261,6 +264,9 @@ def send(
 ) -> None:
     """在旧电脑上运行:扫描、确认排除、配对并开始迁移。"""
     console.print(f"\n[bold cyan]LanMigrate v{__version__} - 发送端[/]")
+    if conflict not in engine.CONFLICT_MODES:
+        console.print(f"[red]--conflict 只能是 {' / '.join(engine.CONFLICT_MODES)}[/]")
+        raise typer.Exit(2)
     _prepare_rclone()
     if full:
         console.print(f"正在完整扫描 {source} …(统计体积,大目录可能需要几分钟)")
@@ -312,6 +318,7 @@ def send(
         user=pairing.SFTP_USER,
         obscured_pass=engine.obscure(password),
         dest=dest,
+        conflict=conflict,
         device_fp=fp,
         filter_lines=filter_lines,
         saved_bytes=saved,
@@ -371,7 +378,8 @@ def sync(
     console.print("  只传输有变化的文件;新电脑上更新过的文件不会被覆盖")
     _rediscover(task)
     task.rounds_completed = 0  # fresh pass over the whole tree
-    _run_task(task, max_rounds, wait, update=True)
+    task.conflict = engine.CONFLICT_UPDATE  # sync = update semantics by definition
+    _run_task(task, max_rounds, wait)
 
 
 # ---------------------------------------------------------------- tasks

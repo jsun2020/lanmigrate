@@ -220,6 +220,7 @@ on("receive_stopped", (m) => {
 let scanResult = null;
 let sourceDir = null;
 let selectedDevice = null;
+let conflictChecked = false;
 
 $("card-send").onclick = () => {
   resetSendScreen();
@@ -232,6 +233,15 @@ function resetSendScreen() {
   $("send-step-device").classList.add("hidden");
   $("send-source").textContent = sourceDir || "尚未选择";
   $("scan-status").textContent = "";
+  resetConflictCheck();
+}
+
+// PRD F12: the conflict probe is bound to a specific receiver+source pair;
+// changing either invalidates it and the two-step confirm starts over.
+function resetConflictCheck() {
+  conflictChecked = false;
+  $("conflict-box").classList.add("hidden");
+  $("btn-start-send").textContent = "开始迁移";
 }
 
 on("scan_progress", (m) => {
@@ -328,6 +338,7 @@ async function discoverDevices() {
 
 async function selectDevice(r, el) {
   selectedDevice = r;
+  resetConflictCheck();
   document.querySelectorAll(".device-item").forEach((d) => d.classList.remove("selected"));
   el.classList.add("selected");
   $("manual-host").value = "";
@@ -341,6 +352,8 @@ async function selectDevice(r, el) {
 }
 
 $("btn-rediscover").onclick = () => discoverDevices();
+
+$("manual-host").addEventListener("input", resetConflictCheck);
 
 $("btn-start-send").onclick = async () => {
   const manualHost = $("manual-host").value.trim();
@@ -356,8 +369,27 @@ $("btn-start-send").onclick = async () => {
     .map((cb) => cb.dataset.rel);
   $("btn-start-send").disabled = true;
   try {
+    // PRD F12: probe once for same-name content on the receiver. If found,
+    // reveal the 3-way choice and let the user confirm with a second click.
+    if (!conflictChecked) {
+      $("device-status").textContent = "正在检查接收端是否已有同名内容…";
+      const chk = await call("check_dest", { host, port, code, source: sourceDir });
+      conflictChecked = true;
+      if (chk.conflict) {
+        const more = chk.existing_total > chk.existing.length
+          ? ` 等共 ${chk.existing_total} 项` : "";
+        $("conflict-names").textContent = chk.existing.join("、") + more;
+        $("conflict-box").classList.remove("hidden");
+        $("btn-start-send").textContent = "确认并开始";
+        $("device-status").textContent = "请选择同名文件的处理方式,然后再点一次开始";
+        return;
+      }
+      $("device-status").textContent = "";
+    }
+    const picked = document.querySelector('input[name="conflict"]:checked');
+    const conflict = picked ? picked.value : "overwrite";
     await call("start_send",
-      { source: sourceDir, host, port, code, fingerprint, enabled });
+      { source: sourceDir, host, port, code, fingerprint, enabled, conflict });
     openProgress(`${sourceDir} -> ${host}:${port}`);
   } catch (e) {
     toast("启动失败: " + e.message);

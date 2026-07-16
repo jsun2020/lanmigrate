@@ -218,12 +218,33 @@ class Session:
 
     # ------------------------------------------------------------ send
 
+    def ipc_check_dest(self, host: str, code: str, source: str,
+                       port: int = 2022, dest: str = "/") -> dict:
+        """Same-name conflict probe (PRD F12): which top-level entries of the
+        source already exist at the receiver? Fails OPEN (conflict=false +
+        error text) - a broken probe must never block a migration."""
+        try:
+            password = pairing.session_password(code)
+            remote = engine.sftp_remote(host, port, pairing.SFTP_USER,
+                                        engine.obscure(password), dest)
+            remote_names = set(engine.list_remote(remote))
+            local_names = [p.name for p in Path(source).iterdir()]
+            overlap = sorted(n for n in local_names if n in remote_names)
+            return {"conflict": bool(overlap), "existing": overlap[:20],
+                    "existing_total": len(overlap)}
+        except Exception as exc:
+            return {"conflict": False, "existing": [], "existing_total": 0,
+                    "error": f"{type(exc).__name__}: {exc}"}
+
     def ipc_start_send(self, source: str, host: str, code: str,
                        port: int = 2022, fingerprint: str = "", dest: str = "/",
                        enabled: Optional[list[str]] = None,
+                       conflict: str = engine.CONFLICT_OVERWRITE,
                        max_rounds: int = 100, wait: int = 60) -> dict:
         if self._send_thread is not None and self._send_thread.is_alive():
             raise IpcError("已有传输任务在进行中")
+        if conflict not in engine.CONFLICT_MODES:
+            raise IpcError(f"未知的同名文件处理方式: {conflict}")
         report = self._scan_report
         if report is None or str(report.root) != str(Path(source).resolve()):
             raise IpcError("请先扫描源目录")
@@ -244,6 +265,7 @@ class Session:
             user=pairing.SFTP_USER,
             obscured_pass=engine.obscure(password),
             dest=dest,
+            conflict=conflict,
             device_fp=fingerprint,
             filter_lines=filter_lines,
             saved_bytes=saved,
@@ -292,7 +314,8 @@ class Session:
                     taskstore.save(task)
                     break
         task.rounds_completed = 0  # fresh pass over the whole tree
-        self._start_worker(task, max_rounds, wait, update=True)
+        task.conflict = engine.CONFLICT_UPDATE  # sync = update semantics
+        self._start_worker(task, max_rounds, wait)
         return {"task": _task_info(task)}
 
     def ipc_cancel_send(self) -> dict:
@@ -306,15 +329,15 @@ class Session:
     # ------------------------------------------------------------ worker
 
     def _start_worker(self, task: taskstore.MigrationTask,
-                      max_rounds: int, wait: int, update: bool = False) -> None:
+                      max_rounds: int, wait: int) -> None:
         self._cancel.clear()
         self._send_thread = threading.Thread(
-            target=self._transfer_loop, args=(task, max_rounds, wait, update),
+            target=self._transfer_loop, args=(task, max_rounds, wait),
             daemon=True)
         self._send_thread.start()
 
     def _transfer_loop(self, task: taskstore.MigrationTask,
-                       max_rounds: int, wait: int, update: bool = False) -> None:
+                       max_rounds: int, wait: int) -> None:
         """Unattended rerun-until-exit-0 loop (same semantics as cli._run_task,
         but events instead of Rich output, and cancellable between/inside rounds)."""
         task.status = taskstore.STATUS_RUNNING
@@ -349,7 +372,7 @@ class Session:
                                      log_file=task.log_file,
                                      on_progress=on_progress,
                                      on_start=set_proc,
-                                     update=update)
+                                     conflict=task.conflict)
                 self._rclone_proc = None
                 if self._cancel.is_set():
                     break

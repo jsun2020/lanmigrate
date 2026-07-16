@@ -34,6 +34,7 @@ class MigrationTask:
     user: str
     obscured_pass: str
     dest: str = "/"
+    conflict: str = "overwrite"  # same-name handling (PRD F12); resume reuses it
     device_fp: str = ""  # receiver fingerprint; survives IP changes (PRD F1)
     filter_lines: list[str] = field(default_factory=list)
     status: str = STATUS_PENDING
