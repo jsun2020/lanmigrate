@@ -55,6 +55,11 @@
         <div class="hint">接收到的文件将保存到:</div>
         <div id="receive-dir" class="path"></div>
         <div class="row">
+          <label for="receive-port">端口</label>
+          <input id="receive-port" value="2022" size="5" inputmode="numeric" />
+          <span class="dim">默认 2022;若被防火墙拦截且无管理员权限,可改用本机已放行的端口(如 8080)</span>
+        </div>
+        <div class="row">
           <button id="btn-receive-dir">更换文件夹…</button>
           <button id="btn-receive-start" class="primary">开始接收</button>
         </div>

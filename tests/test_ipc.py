@@ -56,6 +56,64 @@ def test_start_receive_rejects_busy_port(session, monkeypatch):
     assert "被占用" in reply["error"]
 
 
+def test_start_receive_uses_custom_port(session, tmp_path, monkeypatch):
+    """PRD F13: a standard user whose firewall blocks 2022 can receive on a
+    port that is already allowed (e.g. 8080). The chosen port must reach the
+    SFTP server, the mDNS announcement, and the firewall check alike."""
+    import threading
+
+    from lanmigrate import discovery, engine, preflight
+
+    class FakeProc:
+        def __init__(self):
+            self._done = threading.Event()
+
+        def poll(self):
+            return 0 if self._done.is_set() else None
+
+        def wait(self):
+            self._done.wait()
+            return 0
+
+        def terminate(self):
+            self._done.set()
+
+    seen = {}
+    monkeypatch.setattr(preflight, "port_available", lambda port: True)
+    monkeypatch.setattr(preflight, "is_admin", lambda: False)
+
+    def fake_fw(port):
+        seen["firewall"] = port
+        return True
+
+    def fake_serve(directory, port, user, password):
+        seen["serve"] = port
+        return FakeProc()
+
+    class FakeAnnouncer:
+        def __init__(self, port, fingerprint, name=None):
+            seen["announce"] = port
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(preflight, "firewall_rule_exists", fake_fw)
+    monkeypatch.setattr(engine, "serve_sftp", fake_serve)
+    monkeypatch.setattr(discovery, "Announcer", FakeAnnouncer)
+    monkeypatch.setattr(discovery, "local_ip", lambda: "10.0.0.5")
+
+    reply = call(session, "start_receive",
+                 {"directory": str(tmp_path / "in"), "port": 8080,
+                  "code": "123456"})
+    assert reply["ok"] is True
+    assert reply["result"]["port"] == 8080
+    assert seen == {"firewall": 8080, "serve": 8080, "announce": 8080}
+    assert call(session, "stop_receive", rid=2)["ok"] is True
+
+
 def test_unknown_method(session):
     reply = call(session, "no_such_method")
     assert reply["ok"] is False

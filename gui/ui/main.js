@@ -166,6 +166,8 @@ let receiveDir = "~/Migration";
 
 $("card-receive").onclick = () => {
   $("receive-dir").textContent = receiveDir;
+  // remembered so a standard user who must use e.g. 8080 sets it only once
+  $("receive-port").value = localStorage.getItem("receivePort") || "2022";
   $("receive-wait").classList.remove("hidden");
   $("receive-active").classList.add("hidden");
   show("screen-receive");
@@ -178,9 +180,15 @@ $("btn-receive-dir").onclick = async () => {
 
 $("btn-receive-start").onclick = async () => {
   const btn = $("btn-receive-start");
+  const port = parseInt($("receive-port").value, 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    toast("端口无效,请输入 1~65535 之间的数字");
+    return;
+  }
   btn.disabled = true;
   try {
-    const r = await call("start_receive", { directory: receiveDir });
+    const r = await call("start_receive", { directory: receiveDir, port });
+    localStorage.setItem("receivePort", String(port));
     $("pair-code").textContent = r.code;
     $("receive-ip").textContent = `${r.ip}:${r.port}`;
     $("receive-dir2").textContent = r.directory;
@@ -354,6 +362,7 @@ async function selectDevice(r, el) {
 $("btn-rediscover").onclick = () => discoverDevices();
 
 $("manual-host").addEventListener("input", resetConflictCheck);
+$("manual-port").addEventListener("input", resetConflictCheck);
 
 $("btn-start-send").onclick = async () => {
   const manualHost = $("manual-host").value.trim();
