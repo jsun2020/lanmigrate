@@ -182,9 +182,12 @@ def run_copy(
             log_fh.close()
 
 
-def serve_sftp(directory: Path, port: int, user: str, password: str) -> subprocess.Popen:
+def serve_sftp(directory: Path, port: int, user: str, password: str,
+               capture_log: bool = False) -> subprocess.Popen:
     """Start the receiver-side SFTP server (plain password; rclone serve
-    takes it unobscured). Caller owns the process handle."""
+    takes it unobscured). Caller owns the process handle. With capture_log
+    the server runs at INFO verbosity and stderr is piped; the caller MUST
+    keep draining proc.stderr or rclone will block on a full pipe."""
     rclone = ensure_rclone()
     cmd = [
         str(rclone), "serve", "sftp", str(directory),
@@ -193,11 +196,36 @@ def serve_sftp(directory: Path, port: int, user: str, password: str) -> subproce
         "--pass", password,
         "--vfs-cache-mode", "off",
     ]
+    if capture_log:
+        return subprocess.Popen(cmd + ["-v"], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True,
+                                encoding="utf-8", errors="replace",
+                                **_popen_extra())
     if GUI_MODE:
         # no console to inherit; keep the server quiet and windowless
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, **_popen_extra())
     return subprocess.Popen(cmd)
+
+
+# `rclone serve sftp -v` log lines that reveal transfer activity to the
+# receiver (verified empirically against rclone v1.74):
+#   ... : serve sftp 10.0.0.2:64735->...: SSH login from u using SSH-2.0-...
+#   ... : hello.txt.5a7f61d4.partial: Moved (server-side) to: hello.txt
+_SERVE_MOVED_MARK = "Moved (server-side) to: "
+
+
+def parse_serve_line(line: str) -> Optional[tuple[str, str]]:
+    """Classify one serve-sftp stderr line: ("login", client) when a sender
+    connects, ("file", name) when a file finishes landing, None otherwise."""
+    if "SSH login from" in line:
+        return ("login", line.split("SSH login from", 1)[1].strip())
+    idx = line.find(_SERVE_MOVED_MARK)
+    if idx >= 0:
+        name = line[idx + len(_SERVE_MOVED_MARK):].strip()
+        if name:
+            return ("file", name)
+    return None
 
 
 def list_remote(remote: str, timeout: int = 30) -> list[str]:

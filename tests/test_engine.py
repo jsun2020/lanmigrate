@@ -87,6 +87,21 @@ def test_latest_task_includes_done(tmp_path, monkeypatch):
     assert taskstore.latest_incomplete() is None  # resume still skips done
 
 
+def test_parse_serve_line_classifies_activity():
+    """Receiver-side activity comes from `serve sftp -v` stderr (PRD F16);
+    line shapes verified empirically against rclone v1.74."""
+    login = ("2026/07/22 13:39:21 INFO  : serve sftp 10.0.0.2:64735->"
+             "10.0.0.5:2022: SSH login from u using SSH-2.0-rclone/v1.74.4")
+    moved = ("2026/07/22 13:39:21 INFO  : hello.txt.5a7f61d4.partial: "
+             "Moved (server-side) to: hello.txt")
+    assert engine.parse_serve_line(login) == (
+        "login", "u using SSH-2.0-rclone/v1.74.4")
+    assert engine.parse_serve_line(moved) == ("file", "hello.txt")
+    assert engine.parse_serve_line(
+        "2026/07/22 13:39:19 NOTICE: SFTP server listening on :2022") is None
+    assert engine.parse_serve_line("") is None
+
+
 def test_sftp_remote_string():
     r = engine.sftp_remote("192.168.1.8", 2022, "lanmigrate", "OBSC", "/")
     assert r == ":sftp,host=192.168.1.8,port=2022,user=lanmigrate,pass=OBSC:/"

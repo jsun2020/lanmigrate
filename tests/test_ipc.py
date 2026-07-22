@@ -5,11 +5,22 @@ subprocess. Network/rclone-touching methods (start_send, receive) are only
 tested for their guard paths here - the transfer loop itself reuses the
 e2e-verified engine functions.
 """
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from lanmigrate import ipc, taskstore
+
+
+def wait_until(pred, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
 
 
 @pytest.fixture
@@ -86,7 +97,7 @@ def test_start_receive_uses_custom_port(session, tmp_path, monkeypatch):
         seen["firewall"] = port
         return True
 
-    def fake_serve(directory, port, user, password):
+    def fake_serve(directory, port, user, password, capture_log=False):
         seen["serve"] = port
         return FakeProc()
 
@@ -112,6 +123,138 @@ def test_start_receive_uses_custom_port(session, tmp_path, monkeypatch):
     assert reply["result"]["port"] == 8080
     assert seen == {"firewall": 8080, "serve": 8080, "announce": 8080}
     assert call(session, "stop_receive", rid=2)["ok"] is True
+
+
+class _FakeServeProc:
+    """Stands in for the rclone serve sftp Popen. `lines` feeds the stderr
+    log parser; wait() blocks until terminate() like the real server."""
+
+    def __init__(self, lines=None, dead=False):
+        self._done = threading.Event()
+        if dead:
+            self._done.set()
+        self.stderr = list(lines) if lines is not None else None
+
+    def poll(self):
+        return 1 if self._done.is_set() else None
+
+    def wait(self):
+        self._done.wait()
+        return 1
+
+    def terminate(self):
+        self._done.set()
+
+
+class _RecordingAnnouncer:
+    def __init__(self, port, fingerprint, name=None):
+        self.port = port
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+
+def _patch_receive(monkeypatch, serve):
+    from lanmigrate import discovery, engine, preflight
+
+    announcers = []
+
+    def make_announcer(port, fingerprint, name=None):
+        ann = _RecordingAnnouncer(port, fingerprint, name)
+        announcers.append(ann)
+        return ann
+
+    monkeypatch.setattr(preflight, "port_available", lambda port: True)
+    monkeypatch.setattr(preflight, "is_admin", lambda: False)
+    monkeypatch.setattr(preflight, "firewall_rule_exists", lambda port: True)
+    monkeypatch.setattr(engine, "serve_sftp", serve)
+    monkeypatch.setattr(discovery, "Announcer", make_announcer)
+    monkeypatch.setattr(discovery, "local_ip", lambda: "10.0.0.5")
+    return announcers
+
+
+def test_receive_restart_after_stop(session, tmp_path, monkeypatch):
+    """PRD F15: stop -> start must work in the same session (no app restart).
+    The first announcer must be fully stopped before the second registers,
+    or zeroconf raises NonUniqueNameException."""
+    announcers = _patch_receive(
+        monkeypatch,
+        lambda d, p, u, pw, capture_log=False: _FakeServeProc())
+    assert call(session, "start_receive",
+                {"directory": str(tmp_path / "in"), "port": 2022})["ok"]
+    assert call(session, "stop_receive", rid=2)["ok"]
+    assert announcers[0].stopped is True
+    reply = call(session, "start_receive",
+                 {"directory": str(tmp_path / "in2"), "port": 2022}, rid=3)
+    assert reply["ok"] is True
+    assert len(announcers) == 2 and announcers[1].started
+    call(session, "stop_receive", rid=4)
+
+
+def test_receive_cleans_leftover_announcer(session, tmp_path, monkeypatch):
+    """A start that fails AFTER registering mDNS used to leak a live
+    announcer that made every retry die with NonUniqueNameException."""
+    calls = {"n": 0}
+
+    def flaky_serve(d, p, u, pw, capture_log=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return _FakeServeProc()
+
+    announcers = _patch_receive(monkeypatch, flaky_serve)
+    first = call(session, "start_receive",
+                 {"directory": str(tmp_path / "in"), "port": 2022})
+    assert first["ok"] is False
+    retry = call(session, "start_receive",
+                 {"directory": str(tmp_path / "in"), "port": 2022}, rid=2)
+    assert retry["ok"] is True
+    assert announcers[0].stopped is True  # leftover cleaned before re-register
+    call(session, "stop_receive", rid=3)
+
+
+def test_receive_activity_events_from_serve_log(session, tmp_path, monkeypatch):
+    """PRD F16: SSH logins and landed files in the serve log become
+    receive_activity events with a running file counter."""
+    lines = [
+        "2026/07/22 INFO  : serve sftp 10.0.0.2:5->10.0.0.5:2022: "
+        "SSH login from u using SSH-2.0-rclone/v1.74.4\n",
+        "2026/07/22 INFO  : a.txt.123.partial: Moved (server-side) to: a.txt\n",
+        "2026/07/22 NOTICE: unrelated noise\n",
+        "2026/07/22 INFO  : b.txt.456.partial: Moved (server-side) to: b.txt\n",
+    ]
+    _patch_receive(monkeypatch,
+                   lambda d, p, u, pw, capture_log=False: _FakeServeProc(lines))
+    sess, events = session
+    assert call(session, "start_receive",
+                {"directory": str(tmp_path / "in"), "port": 2022})["ok"]
+    assert wait_until(lambda: sum(
+        1 for e in list(events)
+        if e.get("event") == "receive_activity" and e.get("kind") == "file") == 2)
+    acts = [e for e in events if e.get("event") == "receive_activity"]
+    assert acts[0]["kind"] == "login"
+    assert [a["value"] for a in acts if a["kind"] == "file"] == ["a.txt", "b.txt"]
+    assert [a["files"] for a in acts if a["kind"] == "file"] == [1, 2]
+    call(session, "stop_receive", rid=2)
+
+
+def test_receive_self_death_stops_announcer(session, tmp_path, monkeypatch):
+    """If the SFTP server dies on its own, the announcer must come down with
+    it - otherwise the next start hits NonUniqueNameException (PRD F15)."""
+    announcers = _patch_receive(
+        monkeypatch,
+        lambda d, p, u, pw, capture_log=False: _FakeServeProc(dead=True))
+    sess, events = session
+    assert call(session, "start_receive",
+                {"directory": str(tmp_path / "in"), "port": 2022})["ok"]
+    assert wait_until(lambda: any(
+        e.get("event") == "receive_stopped" for e in list(events)))
+    assert wait_until(lambda: announcers[0].stopped)
 
 
 def test_unknown_method(session):
@@ -268,6 +411,88 @@ def test_check_dest_fails_open_on_probe_error(session, tmp_path, monkeypatch):
     r = reply["result"]
     assert r["conflict"] is False
     assert "connection refused" in r["error"]
+
+
+def test_concurrent_sends_and_targeted_cancel(session, tmp_path, monkeypatch):
+    """PRD F14: two folders transfer at the same time; events carry task_id;
+    cancel can target one task without touching the other."""
+    from lanmigrate import engine
+
+    monkeypatch.setattr(taskstore, "TASKS_DIR", tmp_path / "tasks")
+    monkeypatch.setattr(engine, "obscure", lambda pw: "OBSC")
+
+    src1 = tmp_path / "src1"
+    src1.mkdir()
+    (src1 / "f.txt").write_text("x")
+    src2 = tmp_path / "src2"
+    src2.mkdir()
+    (src2 / "g.txt").write_text("y")
+    key1, key2 = str(src1.resolve()), str(src2.resolve())
+
+    running = {}  # resolved source -> Event that unblocks its fake rclone
+
+    class _FakeRcloneProc:
+        def __init__(self, ev):
+            self._ev = ev
+
+        def terminate(self):
+            self._ev.set()
+
+    def fake_run_copy(source, remote, filter_file=None, log_file=None,
+                      on_progress=None, on_start=None, conflict="overwrite"):
+        ev = threading.Event()
+        running[str(source)] = ev
+        if on_start:
+            on_start(_FakeRcloneProc(ev))
+        ev.wait(timeout=10)
+        return 0
+
+    monkeypatch.setattr(engine, "run_copy", fake_run_copy)
+
+    sess, events = session
+    assert call(session, "scan", {"path": str(src1)})["ok"]
+    assert call(session, "scan", {"path": str(src2)}, rid=2)["ok"]
+
+    r1 = call(session, "start_send",
+              {"source": str(src1), "host": "10.0.0.9", "code": "111111"}, rid=3)
+    assert r1["ok"] is True
+    t1 = r1["result"]["task_id"]
+    assert wait_until(lambda: key1 in running)
+
+    # the SAME folder twice is blocked...
+    dup = call(session, "start_send",
+               {"source": str(src1), "host": "10.0.0.9", "code": "111111"}, rid=4)
+    assert dup["ok"] is False
+    assert "已在传输中" in dup["error"]
+
+    # ...but a DIFFERENT folder starts concurrently (scan report per path)
+    r2 = call(session, "start_send",
+              {"source": str(src2), "host": "10.0.0.9", "code": "111111"}, rid=5)
+    assert r2["ok"] is True
+    t2 = r2["result"]["task_id"]
+    assert t2 != t1
+    assert wait_until(lambda: key2 in running)
+
+    # while both run, the resume banner offers neither of them
+    assert call(session, "latest_incomplete", rid=6)["result"]["task"] is None
+
+    # cancel ONLY task 1
+    c1 = call(session, "cancel_send", {"task_id": t1}, rid=7)
+    assert c1["result"]["cancelled"] is True
+
+    def done_for(tid):
+        return next((e for e in list(events)
+                     if e.get("event") == "send_done"
+                     and e.get("task_id") == tid), None)
+
+    assert wait_until(lambda: done_for(t1) is not None)
+    assert done_for(t1)["cancelled"] is True
+    assert done_for(t2) is None  # task 2 keeps running
+
+    # cancel-all brings down the remaining transfer
+    c2 = call(session, "cancel_send", rid=8)
+    assert c2["result"]["cancelled"] is True
+    assert wait_until(lambda: done_for(t2) is not None)
 
 
 def test_start_send_rejects_unknown_conflict(session):

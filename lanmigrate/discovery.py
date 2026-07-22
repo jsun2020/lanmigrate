@@ -56,7 +56,11 @@ class Announcer:
             properties={"fp": self.fingerprint, "v": "1"},
         )
         self._zc = Zeroconf()
-        self._zc.register_service(self._info)
+        # allow_name_change: a stale record for our own name (previous session
+        # whose goodbye packet was lost, or an mDNS reflector echo) must never
+        # abort the receive with NonUniqueNameException - zeroconf appends a
+        # numeric suffix instead. Senders match by TXT fingerprint, not name.
+        self._zc.register_service(self._info, allow_name_change=True)
 
     def stop(self) -> None:
         if self._zc and self._info:

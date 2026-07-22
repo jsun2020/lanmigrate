@@ -19,6 +19,13 @@
   <main>
     <!-- ============================================== home -->
     <section id="screen-home" class="screen">
+      <div id="progress-banner" class="banner hidden">
+        <div>
+          <b>有传输正在进行</b>
+          <div id="progress-banner-info" class="dim"></div>
+        </div>
+        <button id="btn-view-progress" class="primary">查看进度</button>
+      </div>
       <div id="resume-banner" class="banner hidden">
         <div>
           <b>发现未完成的任务</b>
@@ -70,8 +77,13 @@
         <div class="dim">本机地址 <span id="receive-ip"></span> · 保存到 <span id="receive-dir2"></span></div>
         <div id="receive-mdns" class="dim"></div>
         <div id="receive-firewall" class="dim warn hidden"></div>
-        <div class="note">等待发送端连接…窗口保持打开即可。中断后重新开始接收,发送端会自动续传。</div>
-        <button id="btn-receive-stop" class="danger">停止接收</button>
+        <div id="receive-activity" class="dim"></div>
+        <div class="note">等待发送端连接…窗口保持打开即可。中断后重新开始接收,发送端会自动续传。
+          一批传完后点"完成接收",即可直接接收下一个文件夹,无需重启程序。</div>
+        <div class="row">
+          <button id="btn-receive-next" class="primary">完成接收,继续收下一个</button>
+          <button id="btn-receive-stop" class="danger">停止接收</button>
+        </div>
       </div>
       <div class="footer-row"><button class="linkish btn-home">&#8592; 返回首页</button></div>
     </section>
@@ -108,6 +120,10 @@
           <input id="manual-host" placeholder="接收端 IP" size="14" />
           <input id="manual-port" value="2022" size="5" />
         </div>
+        <label class="row checkbox-row">
+          <input type="checkbox" id="dest-subdir" checked />
+          <span>在接收端创建与源文件夹同名的子文件夹(推荐;多个文件夹同时传输时内容不会混在一起)</span>
+        </label>
         <div class="row">
           <label>配对码(对方屏幕上的 6 位数字)</label>
           <input id="pair-input" maxlength="6" inputmode="numeric" placeholder="000000" />
@@ -138,19 +154,12 @@
     <!-- ============================================== progress -->
     <section id="screen-progress" class="screen hidden">
       <h2 id="progress-title">正在迁移…</h2>
-      <div class="dim" id="progress-task"></div>
-      <div class="progress-outer"><div id="progress-bar" class="progress-inner"></div></div>
-      <div class="stats-row">
-        <div class="stat"><div id="stat-bytes" class="stat-v">-</div><div class="stat-k">已传输</div></div>
-        <div class="stat"><div id="stat-speed" class="stat-v">-</div><div class="stat-k">速度</div></div>
-        <div class="stat"><div id="stat-eta" class="stat-v">-</div><div class="stat-k">剩余时间</div></div>
-        <div class="stat"><div id="stat-files" class="stat-v">-</div><div class="stat-k">文件</div></div>
-        <div class="stat"><div id="stat-round" class="stat-v">1</div><div class="stat-k">轮次</div></div>
-      </div>
-      <div id="progress-current" class="dim ellipsis"></div>
-      <div id="progress-note" class="note">随时可以关闭或取消:任务已保存,之后点"继续传输"即从断点续传。</div>
+      <div id="progress-tasks"></div>
+      <div id="progress-note" class="note">可同时传输多个文件夹:点"再传一个文件夹"回到发送向导,当前传输不受影响。
+        随时可以暂停或关闭:任务已保存,之后点"继续传输"即从断点续传。</div>
       <div class="footer-row">
-        <button id="btn-cancel-send" class="danger">暂停并退出</button>
+        <button id="btn-send-more">再传一个文件夹</button>
+        <button id="btn-cancel-send" class="danger">全部暂停并退出</button>
       </div>
     </section>
 

@@ -152,7 +152,8 @@ async function refreshSyncList() {
 async function doSync(taskId) {
   try {
     const { task } = await call("sync", { task_id: taskId });
-    openProgress(`${task.source} -> ${task.host}:${task.port}`, "正在同步…(只传输有变化的文件)");
+    openProgress(task.task_id,
+      `${task.source} -> ${task.host}:${task.port}(同步:只传有变化的文件)`);
   } catch (e) {
     toast("同步启动失败: " + e.message);
   }
@@ -163,15 +164,35 @@ on("status", (m) => { $("home-status").textContent = m.msg; toast(m.msg); });
 // ------------------------------------------------------------ receive flow
 
 let receiveDir = "~/Migration";
+let receiveSession = null; // start_receive result while the server runs (F15)
+let receiveFiles = 0;
+let receiveLastActivity = 0;
+let receiveIdleTimer = null;
 
 $("card-receive").onclick = () => {
+  if (receiveSession) { // server still running: show the live screen as-is
+    show("screen-receive");
+    return;
+  }
+  showReceiveWait();
+  show("screen-receive");
+};
+
+function showReceiveWait() {
   $("receive-dir").textContent = receiveDir;
   // remembered so a standard user who must use e.g. 8080 sets it only once
   $("receive-port").value = localStorage.getItem("receivePort") || "2022";
   $("receive-wait").classList.remove("hidden");
   $("receive-active").classList.add("hidden");
-  show("screen-receive");
-};
+}
+
+function clearReceiveSession() {
+  receiveSession = null;
+  receiveFiles = 0;
+  clearInterval(receiveIdleTimer);
+  receiveIdleTimer = null;
+  $("receive-activity").textContent = "";
+}
 
 $("btn-receive-dir").onclick = async () => {
   const picked = await dialog.open({ directory: true, title: "选择接收文件夹" });
@@ -189,6 +210,10 @@ $("btn-receive-start").onclick = async () => {
   try {
     const r = await call("start_receive", { directory: receiveDir, port });
     localStorage.setItem("receivePort", String(port));
+    receiveSession = r;
+    receiveFiles = 0;
+    receiveLastActivity = Date.now();
+    receiveIdleTimer = setInterval(updateReceiveIdleHint, 5000);
     $("pair-code").textContent = r.code;
     $("receive-ip").textContent = `${r.ip}:${r.port}`;
     $("receive-dir2").textContent = r.directory;
@@ -212,12 +237,45 @@ $("btn-receive-start").onclick = async () => {
   }
 };
 
+// PRD F15: end this batch and immediately offer the next one - the backend
+// fully tears down the SFTP server + mDNS announcer, so a fresh start works
+// without restarting the app (this used to die with NonUniqueNameException).
+$("btn-receive-next").onclick = async () => {
+  const got = receiveFiles;
+  try { await call("stop_receive"); } catch { /* already stopped */ }
+  clearReceiveSession();
+  showReceiveWait();
+  toast(got > 0 ? `本批接收完成(${got} 个文件),可继续接收下一个文件夹`
+                : "已结束本次接收,可继续接收下一个文件夹");
+};
+
 $("btn-receive-stop").onclick = async () => {
   try { await call("stop_receive"); } catch { /* already stopped */ }
+  clearReceiveSession();
   show("screen-home");
 };
 
+// PRD F16: the serve log finally gives the receiver visible progress
+on("receive_activity", (m) => {
+  receiveLastActivity = Date.now();
+  receiveFiles = m.files;
+  $("receive-activity").textContent = m.kind === "login"
+    ? "发送端已连接,开始接收…"
+    : `已接收 ${m.files} 个文件 · 最新: ${m.value}`;
+});
+
+function updateReceiveIdleHint() {
+  if (!receiveSession || receiveFiles === 0) return;
+  const idle = Math.round((Date.now() - receiveLastActivity) / 1000);
+  if (idle >= 30) {
+    $("receive-activity").textContent =
+      `已接收 ${receiveFiles} 个文件 · 约 ${idle} 秒没有新文件了,` +
+      `若发送端已显示完成,可点"完成接收"`;
+  }
+}
+
 on("receive_stopped", (m) => {
+  clearReceiveSession();
   toast(`接收服务意外停止(exit ${m.exit_code}),端口可能被占用`);
   $("receive-wait").classList.remove("hidden");
   $("receive-active").classList.add("hidden");
@@ -241,6 +299,7 @@ function resetSendScreen() {
   $("send-step-device").classList.add("hidden");
   $("send-source").textContent = sourceDir || "尚未选择";
   $("scan-status").textContent = "";
+  $("dest-subdir").checked = localStorage.getItem("destSubdir") !== "0";
   resetConflictCheck();
 }
 
@@ -363,6 +422,18 @@ $("btn-rediscover").onclick = () => discoverDevices();
 
 $("manual-host").addEventListener("input", resetConflictCheck);
 $("manual-port").addEventListener("input", resetConflictCheck);
+// the conflict probe looks INSIDE the destination dir - toggling the
+// subfolder option changes the destination, so the probe must rerun
+$("dest-subdir").addEventListener("change", () => {
+  localStorage.setItem("destSubdir", $("dest-subdir").checked ? "1" : "0");
+  resetConflictCheck();
+});
+
+function sendDest() {
+  if (!$("dest-subdir").checked) return "/";
+  const name = sourceDir.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+  return name ? "/" + name : "/";
+}
 
 $("btn-start-send").onclick = async () => {
   const manualHost = $("manual-host").value.trim();
@@ -380,9 +451,10 @@ $("btn-start-send").onclick = async () => {
   try {
     // PRD F12: probe once for same-name content on the receiver. If found,
     // reveal the 3-way choice and let the user confirm with a second click.
+    const dest = sendDest();
     if (!conflictChecked) {
       $("device-status").textContent = "正在检查接收端是否已有同名内容…";
-      const chk = await call("check_dest", { host, port, code, source: sourceDir });
+      const chk = await call("check_dest", { host, port, code, source: sourceDir, dest });
       conflictChecked = true;
       if (chk.conflict) {
         const more = chk.existing_total > chk.existing.length
@@ -397,9 +469,9 @@ $("btn-start-send").onclick = async () => {
     }
     const picked = document.querySelector('input[name="conflict"]:checked');
     const conflict = picked ? picked.value : "overwrite";
-    await call("start_send",
-      { source: sourceDir, host, port, code, fingerprint, enabled, conflict });
-    openProgress(`${sourceDir} -> ${host}:${port}`);
+    const r = await call("start_send",
+      { source: sourceDir, host, port, code, fingerprint, enabled, conflict, dest });
+    openProgress(r.task_id, `${sourceDir} -> ${host}:${port}${dest === "/" ? "" : dest}`);
   } catch (e) {
     toast("启动失败: " + e.message);
   } finally {
@@ -408,64 +480,177 @@ $("btn-start-send").onclick = async () => {
 };
 
 // ------------------------------------------------------------ progress
+// PRD F14: several transfers can run at once - one card per task.
 
-function openProgress(taskLabel, title) {
-  $("progress-task").textContent = taskLabel;
-  $("progress-bar").style.width = "0%";
-  $("progress-bar").classList.add("indeterminate");
-  $("stat-bytes").textContent = "-";
-  $("stat-speed").textContent = "-";
-  $("stat-eta").textContent = "-";
-  $("stat-files").textContent = "-";
-  $("stat-round").textContent = "1";
-  $("progress-current").textContent = "";
-  $("progress-title").textContent = title || "正在迁移…";
+const activeTasks = new Map(); // task_id -> card state
+
+function ensureTaskCard(taskId, label) {
+  let t = activeTasks.get(taskId);
+  if (t) return t;
+  const card = document.createElement("div");
+  card.className = "task-card";
+  card.innerHTML = `
+    <div class="task-head">
+      <span class="task-label"></span>
+      <span class="task-state"></span>
+      <button class="task-cancel">暂停</button>
+    </div>
+    <div class="progress-outer"><div class="progress-inner indeterminate"></div></div>
+    <div class="task-stats dim">正在启动…</div>
+    <div class="task-current dim ellipsis"></div>`;
+  card.querySelector(".task-label").textContent = label || taskId;
+  card.querySelector(".task-cancel").onclick = async () => {
+    try { await call("cancel_send", { task_id: taskId }); } catch { /* idle */ }
+  };
+  $("progress-tasks").appendChild(card);
+  t = {
+    card,
+    bar: card.querySelector(".progress-inner"),
+    stateEl: card.querySelector(".task-state"),
+    statsEl: card.querySelector(".task-stats"),
+    currentEl: card.querySelector(".task-current"),
+    cancelBtn: card.querySelector(".task-cancel"),
+    running: true, round: 1,
+  };
+  activeTasks.set(taskId, t);
+  updateProgressTitle();
+  return t;
+}
+
+function runningTasks() {
+  return [...activeTasks.values()].filter((t) => t.running);
+}
+
+function updateProgressTitle() {
+  const n = runningTasks().length;
+  $("progress-title").textContent =
+    n > 1 ? `正在迁移…(${n} 个传输进行中)` : "正在迁移…";
+}
+
+function clearTaskCards() {
+  activeTasks.clear();
+  $("progress-tasks").innerHTML = "";
+}
+
+function openProgress(taskId, label) {
+  ensureTaskCard(taskId, label);
   show("screen-progress");
 }
 
-on("round", (m) => { $("stat-round").textContent = m.round; });
+function refreshProgressBanner() {
+  const running = runningTasks().length;
+  const banner = $("progress-banner");
+  if (activeTasks.size === 0) { banner.classList.add("hidden"); return; }
+  $("progress-banner-info").textContent = running > 0
+    ? `${running} 个传输进行中`
+    : "传输已结束,点击查看结果";
+  banner.classList.remove("hidden");
+}
+
+$("btn-view-progress").onclick = () => {
+  show("screen-progress");
+  maybeFinishAll();
+};
+
+$("btn-send-more").onclick = () => { // queue another folder while running
+  resetSendScreen();
+  show("screen-send");
+};
+
+on("round", (m) => {
+  const t = activeTasks.get(m.task_id);
+  if (t) t.round = m.round;
+});
 
 on("round_failed", (m) => {
-  $("progress-title").textContent =
+  const t = activeTasks.get(m.task_id);
+  if (t) t.statsEl.textContent =
     `第 ${m.round} 轮结束,仍有文件未完成,${m.wait} 秒后自动重试…`;
 });
 
 on("transfer_progress", (m) => {
-  const bar = $("progress-bar");
+  const t = activeTasks.get(m.task_id);
+  if (!t || !t.running) return;
   if (m.total > 0) {
-    bar.classList.remove("indeterminate");
-    bar.style.width = Math.min(100, (m.bytes / m.total) * 100).toFixed(1) + "%";
+    t.bar.classList.remove("indeterminate");
+    t.bar.style.width = Math.min(100, (m.bytes / m.total) * 100).toFixed(1) + "%";
   }
-  $("stat-bytes").textContent = human(m.bytes) + (m.total > 0 ? " / " + human(m.total) : "");
-  $("stat-speed").textContent = human(m.speed) + "/s";
-  $("stat-eta").textContent = humanEta(m.eta);
-  $("stat-files").textContent = `${m.transfers}/${m.total_transfers || "?"}`;
-  $("progress-current").textContent = m.current ? "当前: " + m.current : "";
+  t.statsEl.textContent =
+    human(m.bytes) + (m.total > 0 ? " / " + human(m.total) : "") +
+    ` · ${human(m.speed)}/s · 剩余 ${humanEta(m.eta)}` +
+    ` · 文件 ${m.transfers}/${m.total_transfers || "?"} · 第 ${t.round} 轮`;
+  t.currentEl.textContent = m.current ? "当前: " + m.current : "";
 });
 
 on("send_done", (m) => {
   refreshResumeBanner();
-  if (m.ok) {
+  const t = m.task_id
+    ? ensureTaskCard(m.task_id, m.source || m.task_id)
+    : null;
+  if (t) {
+    t.running = false;
+    t.done = m;
+    t.cancelBtn.classList.add("hidden");
+    t.bar.classList.remove("indeterminate");
+    t.currentEl.textContent = "";
+    if (m.ok) {
+      t.bar.style.width = "100%";
+      t.stateEl.textContent = "✓ 完成";
+      t.stateEl.className = "task-state ok";
+      const mins = (m.elapsed / 60).toFixed(1);
+      t.statsEl.textContent =
+        `共传输 ${human(m.bytes)} · ${mins} 分钟 · ${m.rounds} 轮` +
+        (m.saved_bytes > 0 ? ` · 智能排除节省 ${human(m.saved_bytes)}` : "");
+    } else if (m.cancelled) {
+      t.stateEl.textContent = "已暂停";
+      t.stateEl.className = "task-state paused";
+      t.statsEl.textContent = `已传输 ${human(m.bytes)},任务已保存,可随时继续`;
+    } else {
+      t.stateEl.textContent = "✗ 未完成";
+      t.stateEl.className = "task-state fail";
+      t.statsEl.textContent =
+        (m.error || "未知错误") + "。任务已保存,回到首页可继续传输。";
+    }
+    updateProgressTitle();
+  }
+  refreshProgressBanner();
+  // only auto-navigate when the user is watching the progress screen -
+  // finishing must never yank them out of the send wizard (PRD F14)
+  if (!$("screen-progress").classList.contains("hidden")) maybeFinishAll();
+  else if (t) toast(m.ok ? "一个传输已完成" : "一个传输已结束");
+});
+
+function maybeFinishAll() {
+  if (activeTasks.size === 0 || runningTasks().length > 0) return;
+  const all = [...activeTasks.values()];
+  const okTasks = all.filter((t) => t.done && t.done.ok);
+  const cancelled = all.filter((t) => t.done && t.done.cancelled);
+  const totalBytes = all.reduce((s, t) => s + ((t.done && t.done.bytes) || 0), 0);
+  const saved = okTasks.reduce((s, t) => s + (t.done.saved_bytes || 0), 0);
+  clearTaskCards();
+  refreshProgressBanner();
+  if (okTasks.length === all.length) {
     $("done-icon").classList.remove("fail");
     $("done-icon").innerHTML = "&#10003;";
-    $("done-title").textContent = "迁移完成!";
-    const mins = (m.elapsed / 60).toFixed(1);
-    let detail = `共传输 ${human(m.bytes)},耗时 ${mins} 分钟,${m.rounds} 轮`;
-    if (m.saved_bytes > 0) detail += `;智能排除为你节省了 ${human(m.saved_bytes)}`;
+    $("done-title").textContent = all.length > 1
+      ? `全部 ${all.length} 个文件夹迁移完成!` : "迁移完成!";
+    let detail = `共传输 ${human(totalBytes)}`;
+    if (saved > 0) detail += `;智能排除为你节省了 ${human(saved)}`;
     $("done-detail").textContent = detail;
     show("screen-done");
-  } else if (m.cancelled) {
+  } else if (okTasks.length === 0 && cancelled.length === all.length) {
     toast("已暂停,任务已保存,可随时继续");
     show("screen-home");
   } else {
     $("done-icon").classList.add("fail");
     $("done-icon").innerHTML = "&#10007;";
-    $("done-title").textContent = "迁移未完成";
+    $("done-title").textContent = "部分传输未完成";
     $("done-detail").textContent =
-      (m.error || "未知错误") + "。任务已保存,回到首页可继续传输。";
+      `完成 ${okTasks.length} 个,未完成 ${all.length - okTasks.length} 个。` +
+      "任务已保存,回到首页可继续传输。";
     show("screen-done");
   }
-});
+}
 
 $("btn-cancel-send").onclick = async () => {
   $("btn-cancel-send").disabled = true;
@@ -476,8 +661,9 @@ $("btn-cancel-send").onclick = async () => {
 async function doResume() {
   try {
     const { task } = await call("resume");
-    openProgress(`${task.source} -> ${task.host}:${task.port}`);
-    $("stat-round").textContent = task.rounds_completed + 1;
+    const t = ensureTaskCard(task.task_id, `${task.source} -> ${task.host}:${task.port}`);
+    t.round = task.rounds_completed + 1;
+    show("screen-progress");
   } catch (e) {
     toast("恢复失败: " + e.message);
   }
@@ -486,7 +672,7 @@ async function doResume() {
 // ------------------------------------------------------------ nav
 
 document.querySelectorAll(".btn-home").forEach((b) => {
-  b.onclick = () => { refreshResumeBanner(); show("screen-home"); };
+  b.onclick = () => { refreshResumeBanner(); refreshProgressBanner(); show("screen-home"); };
 });
 
 startup();

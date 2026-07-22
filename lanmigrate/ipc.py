@@ -44,18 +44,30 @@ def _task_info(t: taskstore.MigrationTask) -> dict:
     }
 
 
+class _SendJob:
+    """One in-flight transfer worker (PRD F14: several may run at once)."""
+
+    def __init__(self, source: str):
+        self.source = source
+        self.thread: Optional[threading.Thread] = None
+        self.cancel = threading.Event()
+        self.proc = None  # active rclone copy Popen, if any
+
+    @property
+    def running(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
+
 class Session:
     """One GUI connection. `ipc_<method>` methods are the callable requests;
     `emit` receives every outbound dict (the stdio loop serializes writes)."""
 
     def __init__(self, emit: Callable[[dict], None]):
         self._emit = emit
-        self._send_thread: Optional[threading.Thread] = None
-        self._cancel = threading.Event()
-        self._rclone_proc = None  # active rclone copy Popen, if any
+        self._jobs: dict[str, _SendJob] = {}  # task_id -> worker (PRD F14)
         self._receive_proc = None
         self._announcer: Optional[discovery.Announcer] = None
-        self._scan_report: Optional[scanner.ScanReport] = None
+        self._scan_reports: dict[str, scanner.ScanReport] = {}  # by root path
 
     # ------------------------------------------------------------ dispatch
 
@@ -78,10 +90,7 @@ class Session:
                         "trace": traceback.format_exc(limit=5)})
 
     def shutdown(self) -> None:
-        self._cancel.set()
-        proc = self._rclone_proc
-        if proc is not None:
-            proc.terminate()
+        self.ipc_cancel_send()
         self.ipc_stop_receive()
 
     # ------------------------------------------------------------ simple
@@ -116,8 +125,17 @@ class Session:
         return {"tasks": [_task_info(t) for t in taskstore.all_tasks()]}
 
     def ipc_latest_incomplete(self) -> dict:
-        task = taskstore.latest_incomplete()
+        task = self._latest_incomplete_idle()
         return {"task": _task_info(task) if task else None}
+
+    def _latest_incomplete_idle(self) -> Optional[taskstore.MigrationTask]:
+        """Latest incomplete task that is not being transferred right now -
+        an actively running task must not be offered for "resume" (PRD F14)."""
+        running = {tid for tid, j in self._jobs.items() if j.running}
+        candidates = [t for t in taskstore.all_tasks()
+                      if t.status != taskstore.STATUS_DONE
+                      and t.task_id not in running]
+        return max(candidates, key=lambda t: t.updated_at) if candidates else None
 
     # ------------------------------------------------------------ scan
 
@@ -136,7 +154,7 @@ class Session:
                         "files": files, "bytes": size, "rel": rel})
 
         report = scanner.scan(src, on_progress=progress, compute_sizes=full)
-        self._scan_report = report
+        self._scan_reports[str(report.root)] = report
         return {
             "path": str(report.root),
             "file_count": report.file_count,
@@ -167,6 +185,11 @@ class Session:
 
         if self._receive_proc is not None and self._receive_proc.poll() is None:
             raise IpcError("接收服务已在运行")
+        # PRD F15: a dead server or a partially-failed previous start may have
+        # left the mDNS announcer registered. Its still-live Zeroconf instance
+        # would "defend" our service name and make the re-registration below
+        # fail with NonUniqueNameException - clean up unconditionally first.
+        self.ipc_stop_receive()
         if not preflight.port_available(port):
             raise IpcError(f"端口 {port} 已被占用,请先关闭占用它的程序")
         # PRD F11: elevated -> create the inbound allow rule automatically;
@@ -187,11 +210,12 @@ class Session:
         try:
             self._announcer.start()
             mdns = True
-        except OSError:
-            self._announcer = None  # mDNS blocked; manual IP entry still works
+        except Exception:  # mDNS blocked/conflicted; manual IP entry works
+            self._announcer = None
             mdns = False
 
-        self._receive_proc = engine.serve_sftp(target, port, pairing.SFTP_USER, password)
+        self._receive_proc = engine.serve_sftp(target, port, pairing.SFTP_USER,
+                                               password, capture_log=True)
         threading.Thread(target=self._watch_receive,
                          args=(self._receive_proc,), daemon=True).start()
         return {"code": code, "ip": discovery.local_ip(), "port": port,
@@ -199,9 +223,25 @@ class Session:
                 "firewall_ok": firewall_ok, "firewall_msg": firewall_msg}
 
     def _watch_receive(self, proc) -> None:
+        # Drain the serve log for the whole process lifetime (a full pipe
+        # would block rclone) and surface activity to the GUI (PRD F16):
+        # the receiver finally sees "sender connected" / "N files landed".
+        files = 0
+        stderr = getattr(proc, "stderr", None)
+        if stderr is not None:
+            for line in stderr:
+                parsed = engine.parse_serve_line(line)
+                if parsed is None:
+                    continue
+                kind, value = parsed
+                if kind == "file":
+                    files += 1
+                self._emit({"event": "receive_activity", "kind": kind,
+                            "value": value, "files": files})
         rc = proc.wait()
         if self._receive_proc is proc:  # died on its own (e.g. port in use)
             self._receive_proc = None
+            self.ipc_stop_receive()  # PRD F15: never leave the announcer up
             self._emit({"event": "receive_stopped", "exit_code": rc})
 
     def ipc_stop_receive(self) -> dict:
@@ -241,12 +281,15 @@ class Session:
                        enabled: Optional[list[str]] = None,
                        conflict: str = engine.CONFLICT_OVERWRITE,
                        max_rounds: int = 100, wait: int = 60) -> dict:
-        if self._send_thread is not None and self._send_thread.is_alive():
-            raise IpcError("已有传输任务在进行中")
+        src_key = str(Path(source).resolve())
+        # PRD F14: transfers run in parallel; only the SAME folder twice is
+        # blocked (it would just make two rclone processes fight each other).
+        if any(j.running and j.source == src_key for j in list(self._jobs.values())):
+            raise IpcError("该文件夹已在传输中")
         if conflict not in engine.CONFLICT_MODES:
             raise IpcError(f"未知的同名文件处理方式: {conflict}")
-        report = self._scan_report
-        if report is None or str(report.root) != str(Path(source).resolve()):
+        report = self._scan_reports.get(src_key)
+        if report is None:
             raise IpcError("请先扫描源目录")
         enabled_set = (set(enabled) if enabled is not None
                        else {e.rel for e in report.exclusions})
@@ -277,11 +320,10 @@ class Session:
 
     def ipc_resume(self, task_id: Optional[str] = None,
                    max_rounds: int = 100, wait: int = 60) -> dict:
-        if self._send_thread is not None and self._send_thread.is_alive():
-            raise IpcError("已有传输任务在进行中")
-        task = taskstore.load(task_id) if task_id else taskstore.latest_incomplete()
+        task = taskstore.load(task_id) if task_id else self._latest_incomplete_idle()
         if task is None:
             raise IpcError("没有未完成的任务")
+        self._reject_if_running(task)
         # IP may have changed: re-discover by device fingerprint (PRD F1/F4)
         if task.device_fp:
             for r in discovery.discover(timeout=5.0):
@@ -299,11 +341,10 @@ class Session:
                  max_rounds: int = 100, wait: int = 60) -> dict:
         """Incremental sync (PRD F9): re-run any task, done ones included.
         --update mode never overwrites files that are newer on the receiver."""
-        if self._send_thread is not None and self._send_thread.is_alive():
-            raise IpcError("已有传输任务在进行中")
         task = taskstore.load(task_id) if task_id else taskstore.latest_task()
         if task is None:
             raise IpcError("没有可同步的任务,请先完成一次迁移")
+        self._reject_if_running(task)
         if task.device_fp:
             for r in discovery.discover(timeout=5.0):
                 if (r.fingerprint == task.device_fp
@@ -318,25 +359,38 @@ class Session:
         self._start_worker(task, max_rounds, wait)
         return {"task": _task_info(task)}
 
-    def ipc_cancel_send(self) -> dict:
-        running = self._send_thread is not None and self._send_thread.is_alive()
-        self._cancel.set()
-        proc = self._rclone_proc
-        if proc is not None:
-            proc.terminate()
-        return {"cancelled": running}
+    def ipc_cancel_send(self, task_id: Optional[str] = None) -> dict:
+        """Cancel one running transfer (task_id given) or all of them."""
+        hit = False
+        for tid, job in list(self._jobs.items()):
+            if task_id is not None and tid != task_id:
+                continue
+            if not job.running:
+                continue
+            hit = True
+            job.cancel.set()
+            proc = job.proc
+            if proc is not None:
+                proc.terminate()
+        return {"cancelled": hit}
 
     # ------------------------------------------------------------ worker
 
+    def _reject_if_running(self, task: taskstore.MigrationTask) -> None:
+        job = self._jobs.get(task.task_id)
+        if job is not None and job.running:
+            raise IpcError("该任务已在传输中")
+
     def _start_worker(self, task: taskstore.MigrationTask,
                       max_rounds: int, wait: int) -> None:
-        self._cancel.clear()
-        self._send_thread = threading.Thread(
-            target=self._transfer_loop, args=(task, max_rounds, wait),
+        job = _SendJob(source=task.source)
+        self._jobs[task.task_id] = job
+        job.thread = threading.Thread(
+            target=self._transfer_loop, args=(job, task, max_rounds, wait),
             daemon=True)
-        self._send_thread.start()
+        job.thread.start()
 
-    def _transfer_loop(self, task: taskstore.MigrationTask,
+    def _transfer_loop(self, job: _SendJob, task: taskstore.MigrationTask,
                        max_rounds: int, wait: int) -> None:
         """Unattended rerun-until-exit-0 loop (same semantics as cli._run_task,
         but events instead of Rich output, and cancellable between/inside rounds)."""
@@ -350,7 +404,7 @@ class Session:
         def on_progress(p: engine.Progress) -> None:
             nonlocal last
             last = p
-            self._emit({"event": "transfer_progress",
+            self._emit({"event": "transfer_progress", "task_id": task.task_id,
                         "bytes": p.bytes_done, "total": p.total_bytes,
                         "speed": p.speed, "eta": p.eta, "current": p.current,
                         "transfers": p.transfers,
@@ -358,23 +412,24 @@ class Session:
                         "errors": p.errors})
 
         def set_proc(proc) -> None:
-            self._rclone_proc = proc
-            if self._cancel.is_set():  # cancel raced the process start
+            job.proc = proc
+            if job.cancel.is_set():  # cancel raced the process start
                 proc.terminate()
 
         try:
             for rnd in range(task.rounds_completed + 1, max_rounds + 1):
-                if self._cancel.is_set():
+                if job.cancel.is_set():
                     break
-                self._emit({"event": "round", "round": rnd})
+                self._emit({"event": "round", "task_id": task.task_id,
+                            "round": rnd})
                 rc = engine.run_copy(Path(task.source), remote,
                                      filter_file=task.filter_file,
                                      log_file=task.log_file,
                                      on_progress=on_progress,
                                      on_start=set_proc,
                                      conflict=task.conflict)
-                self._rclone_proc = None
-                if self._cancel.is_set():
+                job.proc = None
+                if job.cancel.is_set():
                     break
                 task.rounds_completed = rnd
                 taskstore.save(task)
@@ -383,33 +438,34 @@ class Session:
                     taskstore.save(task)
                     self._emit({"event": "send_done", "ok": True,
                                 "task_id": task.task_id, "rounds": rnd,
+                                "source": task.source,
                                 "bytes": last.bytes_done,
                                 "elapsed": time.time() - started,
                                 "saved_bytes": task.saved_bytes,
                                 "log": str(task.log_file)})
                     return
-                self._emit({"event": "round_failed", "round": rnd,
-                            "exit_code": rc, "wait": wait,
+                self._emit({"event": "round_failed", "task_id": task.task_id,
+                            "round": rnd, "exit_code": rc, "wait": wait,
                             "errors": last.errors})
-                if self._cancel.wait(wait):
+                if job.cancel.wait(wait):
                     break
             taskstore.save(task)  # interrupt-safe: persist before reporting
-            if self._cancel.is_set():
+            if job.cancel.is_set():
                 self._emit({"event": "send_done", "ok": False, "cancelled": True,
-                            "task_id": task.task_id,
+                            "task_id": task.task_id, "source": task.source,
                             "bytes": last.bytes_done})
             else:
                 self._emit({"event": "send_done", "ok": False, "cancelled": False,
-                            "task_id": task.task_id,
+                            "task_id": task.task_id, "source": task.source,
                             "error": f"已达最大轮数({max_rounds})仍未完成",
                             "log": str(task.log_file)})
         except Exception as exc:
             taskstore.save(task)
             self._emit({"event": "send_done", "ok": False, "cancelled": False,
-                        "task_id": task.task_id,
+                        "task_id": task.task_id, "source": task.source,
                         "error": f"{type(exc).__name__}: {exc}"})
         finally:
-            self._rclone_proc = None
+            job.proc = None
 
 
 # ---------------------------------------------------------------- stdio loop

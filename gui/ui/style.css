@@ -107,6 +107,8 @@ input:focus { outline: 2px solid rgba(24,105,220,.35); }
 #pair-input { font-size: 22px; letter-spacing: 8px; width: 170px; text-align: center; }
 
 .row { display: flex; align-items: center; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+.checkbox-row { cursor: pointer; font-size: 13.5px; color: var(--dim); gap: 8px; }
+.checkbox-row input { accent-color: var(--accent); }
 .footer-row { display: flex; justify-content: space-between; align-items: center; margin-top: 22px; }
 .footer-row > :only-child { margin-left: auto; }
 .grow { flex: 1; }
@@ -162,6 +164,24 @@ input:focus { outline: 2px solid rgba(24,105,220,.35); }
 .device-item .addr { color: var(--dim); font-size: 13px; }
 
 /* progress */
+.task-card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px 18px; margin-bottom: 14px;
+}
+.task-head { display: flex; align-items: center; gap: 12px; }
+.task-label {
+  flex: 1; font-family: Consolas, monospace; font-size: 13px;
+  word-break: break-all;
+}
+.task-state { font-weight: 700; white-space: nowrap; }
+.task-state.ok { color: var(--ok); }
+.task-state.fail { color: var(--danger); }
+.task-state.paused { color: #c47f17; }
+.task-cancel { padding: 4px 12px; font-size: 13px; }
+.task-card .progress-outer { margin: 12px 0 8px; height: 12px; }
+.task-stats { min-height: 18px; }
+.task-current { margin-top: 4px; }
+
 .progress-outer {
   height: 16px; background: #e4eaf4; border-radius: 8px; overflow: hidden;
   margin: 18px 0 6px;
