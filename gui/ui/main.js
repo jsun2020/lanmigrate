@@ -97,16 +97,45 @@ async function startup() {
   }
 }
 
+// PRD F17: every device's unfinished task is listed and resumable on its
+// own - starting a transfer to a second device never hides the first one.
 async function refreshResumeBanner() {
   try {
-    const { task } = await call("latest_incomplete");
-    if (task) {
+    const { tasks } = await call("list_tasks");
+    const seen = new Set();
+    const rows = tasks
+      .filter((t) => t.status !== "done" && !t.running)
+      .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
+      .filter((t) => { // one row per source->destination, newest wins
+        const key = `${t.source}|${t.host}|${t.dest}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 5);
+    const list = $("resume-list");
+    list.innerHTML = "";
+    if (!rows.length) { $("resume-banner").classList.add("hidden"); }
+    else {
+      rows.forEach((t) => {
+        const item = document.createElement("div");
+        item.className = "sync-item";
+        const src = document.createElement("span");
+        src.className = "src";
+        src.textContent = t.source;
+        const dst = document.createElement("span");
+        dst.className = "dst";
+        dst.textContent = `-> ${t.host}:${t.port}` +
+          (t.dest && t.dest !== "/" ? t.dest : "") +
+          ` · 已完成 ${t.rounds_completed} 轮 · ${t.updated_at.slice(0, 10)}`;
+        const btn = document.createElement("button");
+        btn.className = "primary";
+        btn.textContent = "继续传输";
+        btn.onclick = () => doResume(t.task_id);
+        item.append(src, dst, btn);
+        list.appendChild(item);
+      });
       $("resume-banner").classList.remove("hidden");
-      $("resume-info").textContent =
-        `${task.source} -> ${task.host}:${task.port}(已完成 ${task.rounds_completed} 轮)`;
-      $("btn-resume").onclick = () => doResume();
-    } else {
-      $("resume-banner").classList.add("hidden");
     }
   } catch { /* banner is best-effort */ }
   refreshSyncList();
@@ -182,6 +211,10 @@ function showReceiveWait() {
   $("receive-dir").textContent = receiveDir;
   // remembered so a standard user who must use e.g. 8080 sets it only once
   $("receive-port").value = localStorage.getItem("receivePort") || "2022";
+  // PRD F17: resuming days later only authenticates if this machine keeps
+  // its pairing code (the sender's saved task derives its password from it)
+  $("reuse-code-row").classList.toggle(
+    "hidden", !/^\d{6}$/.test(localStorage.getItem("pairCode") || ""));
   $("receive-wait").classList.remove("hidden");
   $("receive-active").classList.add("hidden");
 }
@@ -208,8 +241,15 @@ $("btn-receive-start").onclick = async () => {
   }
   btn.disabled = true;
   try {
-    const r = await call("start_receive", { directory: receiveDir, port });
+    const savedCode = localStorage.getItem("pairCode") || "";
+    const params = { directory: receiveDir, port };
+    if (!$("reuse-code-row").classList.contains("hidden")
+        && $("reuse-code").checked && /^\d{6}$/.test(savedCode)) {
+      params.code = savedCode;
+    }
+    const r = await call("start_receive", params);
     localStorage.setItem("receivePort", String(port));
+    localStorage.setItem("pairCode", r.code);
     receiveSession = r;
     receiveFiles = 0;
     receiveLastActivity = Date.now();
@@ -658,11 +698,14 @@ $("btn-cancel-send").onclick = async () => {
   $("btn-cancel-send").disabled = false;
 };
 
-async function doResume() {
+async function doResume(taskId) {
   try {
-    const { task } = await call("resume");
-    const t = ensureTaskCard(task.task_id, `${task.source} -> ${task.host}:${task.port}`);
+    const { task } = await call("resume", taskId ? { task_id: taskId } : {});
+    const t = ensureTaskCard(task.task_id,
+      `${task.source} -> ${task.host}:${task.port}` +
+      (task.dest && task.dest !== "/" ? task.dest : ""));
     t.round = task.rounds_completed + 1;
+    refreshResumeBanner();
     show("screen-progress");
   } catch (e) {
     toast("恢复失败: " + e.message);

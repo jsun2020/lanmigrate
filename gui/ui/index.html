@@ -26,12 +26,10 @@
         </div>
         <button id="btn-view-progress" class="primary">查看进度</button>
       </div>
-      <div id="resume-banner" class="banner hidden">
-        <div>
-          <b>发现未完成的任务</b>
-          <div id="resume-info" class="dim"></div>
-        </div>
-        <button id="btn-resume" class="primary">继续传输</button>
+      <div id="resume-banner" class="banner banner-stack hidden">
+        <b>发现未完成的任务</b>
+        <div class="dim">每台设备的传输记录独立保存,可分别继续;不同设备可同时传输。</div>
+        <div id="resume-list" class="sync-list"></div>
       </div>
 
       <div class="cards">
@@ -66,6 +64,10 @@
           <input id="receive-port" value="2022" size="5" inputmode="numeric" />
           <span class="dim">默认 2022;若被防火墙拦截且无管理员权限,可改用本机已放行的端口(如 8080)</span>
         </div>
+        <label class="row checkbox-row hidden" id="reuse-code-row">
+          <input type="checkbox" id="reuse-code" checked />
+          <span>沿用上次的配对码(推荐;隔天继续传输或增量同步时,发送端无需重新配对)</span>
+        </label>
         <div class="row">
           <button id="btn-receive-dir">更换文件夹…</button>
           <button id="btn-receive-start" class="primary">开始接收</button>

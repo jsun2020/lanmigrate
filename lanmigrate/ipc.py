@@ -122,7 +122,11 @@ class Session:
         }
 
     def ipc_list_tasks(self) -> dict:
-        return {"tasks": [_task_info(t) for t in taskstore.all_tasks()]}
+        # PRD F17: the GUI resume list must not offer a task that is being
+        # transferred right now, so each entry carries its live running state.
+        running = {tid for tid, j in self._jobs.items() if j.running}
+        return {"tasks": [dict(_task_info(t), running=t.task_id in running)
+                          for t in taskstore.all_tasks()]}
 
     def ipc_latest_incomplete(self) -> dict:
         task = self._latest_incomplete_idle()

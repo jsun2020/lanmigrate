@@ -82,6 +82,9 @@ h2 { font-size: 20px; margin-bottom: 14px; }
   background: #fff8e6; border: 1px solid #f0dfae; border-radius: 10px;
   padding: 14px 18px; margin-bottom: 20px;
 }
+.banner-stack { display: block; } /* banner holding a task list, not one row */
+.banner-stack .sync-list { margin-top: 10px; }
+.banner-stack .sync-item { background: #fff; }
 
 /* buttons and inputs */
 button {

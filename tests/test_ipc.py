@@ -335,6 +335,7 @@ def test_list_tasks_and_latest(session, tmp_path, monkeypatch):
     taskstore.save(task)
     tasks = call(session, "list_tasks", rid=3)["result"]["tasks"]
     assert len(tasks) == 1 and tasks[0]["task_id"] == "t1"
+    assert tasks[0]["running"] is False
     latest = call(session, "latest_incomplete", rid=4)["result"]["task"]
     assert latest["task_id"] == "t1"
 
@@ -493,6 +494,77 @@ def test_concurrent_sends_and_targeted_cancel(session, tmp_path, monkeypatch):
     c2 = call(session, "cancel_send", rid=8)
     assert c2["result"]["cancelled"] is True
     assert wait_until(lambda: done_for(t2) is not None)
+
+
+def test_resume_by_id_runs_tasks_to_two_devices_concurrently(
+        session, tmp_path, monkeypatch):
+    """PRD F17: task records are per-device and never overwrite each other.
+    An OLDER incomplete task (the Mac) stays resumable by id after a newer
+    one (the Windows PC) was created, and both can transfer at once."""
+    from lanmigrate import engine
+
+    monkeypatch.setattr(taskstore, "TASKS_DIR", tmp_path / "tasks")
+
+    src_mac = tmp_path / "for-mac"
+    src_mac.mkdir()
+    src_win = tmp_path / "for-win"
+    src_win.mkdir()
+    taskstore.save(taskstore.MigrationTask(
+        task_id="t-mac", source=str(src_mac), host="10.0.0.20", port=2022,
+        user="lanmigrate", obscured_pass="xx", rounds_completed=2))
+    time.sleep(1.1)  # updated_at has 1s resolution; make t-win strictly newer
+    taskstore.save(taskstore.MigrationTask(
+        task_id="t-win", source=str(src_win), host="10.0.0.30", port=2022,
+        user="lanmigrate", obscured_pass="yy"))
+
+    # default resume (no id) offers only the newest -> the Mac task would be
+    # unreachable without the explicit task_id path the GUI list now uses
+    latest = call(session, "latest_incomplete")["result"]["task"]
+    assert latest["task_id"] == "t-win"
+
+    running = {}  # resolved source -> Event that unblocks its fake rclone
+
+    class _FakeRcloneProc:
+        def __init__(self, ev):
+            self._ev = ev
+
+        def terminate(self):
+            self._ev.set()
+
+    def fake_run_copy(source, remote, filter_file=None, log_file=None,
+                      on_progress=None, on_start=None, conflict="overwrite"):
+        ev = threading.Event()
+        running[str(source)] = ev
+        if on_start:
+            on_start(_FakeRcloneProc(ev))
+        ev.wait(timeout=10)
+        return 0
+
+    monkeypatch.setattr(engine, "run_copy", fake_run_copy)
+
+    r_mac = call(session, "resume", {"task_id": "t-mac"}, rid=2)
+    assert r_mac["ok"] is True
+    assert r_mac["result"]["task"]["host"] == "10.0.0.20"
+    assert wait_until(lambda: str(src_mac) in running)
+
+    # both devices transfer at the same time
+    r_win = call(session, "resume", {"task_id": "t-win"}, rid=3)
+    assert r_win["ok"] is True
+    assert wait_until(lambda: str(src_win) in running)
+
+    by_id = {t["task_id"]: t
+             for t in call(session, "list_tasks", rid=4)["result"]["tasks"]}
+    assert by_id["t-mac"]["running"] and by_id["t-win"]["running"]
+
+    # a running task must not be resumable a second time
+    dup = call(session, "resume", {"task_id": "t-mac"}, rid=5)
+    assert dup["ok"] is False
+    assert "已在传输中" in dup["error"]
+
+    assert call(session, "cancel_send", rid=6)["result"]["cancelled"] is True
+    sess, events = session
+    assert wait_until(lambda: sum(
+        1 for e in list(events) if e.get("event") == "send_done") == 2)
 
 
 def test_start_send_rejects_unknown_conflict(session):
