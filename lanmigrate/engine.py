@@ -228,6 +228,41 @@ def parse_serve_line(line: str) -> Optional[tuple[str, str]]:
     return None
 
 
+# Round-failure classification (PRD F18). The unattended retry loop needs to
+# know WHY a round failed: an auth failure can never heal by retrying (the
+# password is derived from the pairing code), while connection problems and
+# locked files are legitimately retried.
+_AUTH_MARKS = ("unable to authenticate", "handshake failed",
+               "permission denied (publickey,password)")
+_CONNECT_MARKS = ("connection refused", "connectex", "i/o timeout",
+                  "no route to host", "network is unreachable",
+                  "connection reset", "connection timed out", "dial tcp")
+
+
+def classify_copy_errors(log_text: str) -> tuple[str, str]:
+    """Classify one round's rclone log slice.
+
+    Returns ("auth" | "connect" | "other", detail) where detail is the last
+    matching error message (may be empty). Lines are --use-json-log objects;
+    only their msg field is inspected (raw text is checked as a fallback)."""
+    category, detail = "other", ""
+    for line in log_text.splitlines():
+        msg = line.strip()
+        if msg.startswith("{"):
+            try:
+                msg = str(json.loads(msg).get("msg", ""))
+            except ValueError:
+                pass
+        low = msg.lower()
+        if any(m in low for m in _AUTH_MARKS):
+            category, detail = "auth", msg.strip()[:300]
+        elif category != "auth" and any(m in low for m in _CONNECT_MARKS):
+            category, detail = "connect", msg.strip()[:300]
+        elif category == "other" and ("failed to" in low or "error:" in low):
+            detail = msg.strip()[:300]
+    return category, detail
+
+
 def list_remote(remote: str, timeout: int = 30) -> list[str]:
     """Top-level entry names at the remote (PRD F12 conflict probe).
     Directory entries come back with a trailing '/', which is stripped.

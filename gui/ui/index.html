@@ -105,10 +105,12 @@
 
       <div id="send-step-exclude" class="step hidden">
         <div class="hint">第 2 步 / 共 3 步 · 确认要跳过的依赖目录(可重新生成,无需迁移)</div>
+        <div id="exclude-cache-note" class="dim hidden"></div>
         <div id="exclude-summary" class="dim"></div>
         <div id="exclude-list" class="exclude-list"></div>
         <div class="footer-row">
           <button id="btn-rescan" class="linkish">重新选择文件夹</button>
+          <button id="btn-force-rescan" class="linkish hidden">重新扫描本文件夹</button>
           <button id="btn-exclude-next" class="primary">下一步:选择接收设备</button>
         </div>
       </div>

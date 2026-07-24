@@ -107,3 +107,32 @@ def test_sftp_remote_string():
     assert r == ":sftp,host=192.168.1.8,port=2022,user=lanmigrate,pass=OBSC:/"
     r2 = engine.sftp_remote("h", 22, "u", "p", "sub/dir")
     assert r2.endswith(":/sub/dir")
+
+
+def test_classify_copy_errors_auth_connect_other():
+    """PRD F18: round-failure triage. Auth = unhealable (stop and re-pair);
+    connect = receiver down (keep retrying); other = e.g. locked files."""
+    auth = (
+        '{"level":"error","msg":"Failed to create file system: NewFs: '
+        "couldn't connect SSH: ssh: handshake failed: ssh: unable to "
+        'authenticate, attempted methods [none password]"}'
+    )
+    cat, detail = engine.classify_copy_errors(auth)
+    assert cat == "auth"
+    assert "authenticate" in detail
+
+    conn = (
+        '{"level":"error","msg":"Failed to create file system: NewFs: '
+        "dial tcp 192.168.1.2:2026: connectex: No connection could be made "
+        'because the target machine actively refused it."}'
+    )
+    assert engine.classify_copy_errors(conn)[0] == "connect"
+
+    locked = '{"level":"error","msg":"Failed to copy: sftp: open NTUSER.DAT: locked"}'
+    cat, detail = engine.classify_copy_errors(locked)
+    assert cat == "other"
+    assert "Failed to copy" in detail
+
+    # auth wins even when connect markers appear in the same slice
+    assert engine.classify_copy_errors(conn + "\n" + auth)[0] == "auth"
+    assert engine.classify_copy_errors("")[0] == "other"

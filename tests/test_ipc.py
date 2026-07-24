@@ -567,6 +567,127 @@ def test_resume_by_id_runs_tasks_to_two_devices_concurrently(
         1 for e in list(events) if e.get("event") == "send_done") == 2)
 
 
+def test_auth_failure_stops_retry_and_update_code_repairs(
+        session, tmp_path, monkeypatch):
+    """PRD F18: a wrong pairing code must NOT loop 100 blind rounds - the
+    first auth-failed round ends the task with need_code=True, and
+    update_code re-derives the password so resume works again."""
+    from lanmigrate import engine
+
+    monkeypatch.setattr(taskstore, "TASKS_DIR", tmp_path / "tasks")
+    src = tmp_path / "src"
+    src.mkdir()
+    taskstore.save(taskstore.MigrationTask(
+        task_id="t-auth", source=str(src), host="10.0.0.2", port=2022,
+        user="lanmigrate", obscured_pass="OLD"))
+
+    calls = {"n": 0}
+
+    def failing_run_copy(source, remote, filter_file=None, log_file=None,
+                         on_progress=None, on_start=None, conflict="overwrite"):
+        calls["n"] += 1
+        with open(log_file, "a", encoding="utf-8") as fh:
+            fh.write('{"level":"error","msg":"ssh: handshake failed: '
+                     'ssh: unable to authenticate"}\n')
+        return 1
+
+    monkeypatch.setattr(engine, "run_copy", failing_run_copy)
+    sess, events = session
+    assert call(session, "resume", {"task_id": "t-auth"})["ok"] is True
+    assert wait_until(lambda: any(
+        e.get("event") == "send_done" for e in list(events)))
+    done = next(e for e in events if e.get("event") == "send_done")
+    assert done["ok"] is False and done.get("need_code") is True
+    assert "配对码" in done["error"]
+    assert calls["n"] == 1  # stopped immediately, no 60s retry wait
+
+    # re-pair: the new code becomes a new obscured password on the task
+    monkeypatch.setattr(engine, "obscure", lambda pw: "NEW:" + pw)
+    rep = call(session, "update_code",
+               {"task_id": "t-auth", "code": "654321"}, rid=2)
+    assert rep["ok"] is True
+    assert taskstore.load("t-auth").obscured_pass.startswith("NEW:")
+
+
+def test_connect_failure_keeps_retrying_with_reason(
+        session, tmp_path, monkeypatch):
+    """A receiver that is down may come back - the loop must keep retrying,
+    but round_failed now says WHY (reason=connect) instead of the old
+    generic message."""
+    from lanmigrate import engine
+
+    monkeypatch.setattr(taskstore, "TASKS_DIR", tmp_path / "tasks")
+    src = tmp_path / "src"
+    src.mkdir()
+    taskstore.save(taskstore.MigrationTask(
+        task_id="t-conn", source=str(src), host="10.0.0.2", port=2022,
+        user="lanmigrate", obscured_pass="xx"))
+
+    def refused_run_copy(source, remote, filter_file=None, log_file=None,
+                         on_progress=None, on_start=None, conflict="overwrite"):
+        with open(log_file, "a", encoding="utf-8") as fh:
+            fh.write('{"level":"error","msg":"dial tcp 10.0.0.2:2022: '
+                     'connectex: connection refused"}\n')
+        return 1
+
+    monkeypatch.setattr(engine, "run_copy", refused_run_copy)
+    sess, events = session
+    assert call(session, "resume",
+                {"task_id": "t-conn", "wait": 1})["ok"] is True
+    assert wait_until(lambda: any(
+        e.get("event") == "round_failed" for e in list(events)))
+    rf = next(e for e in events if e.get("event") == "round_failed")
+    assert rf["reason"] == "connect"
+    assert call(session, "cancel_send", rid=2)["ok"] is True
+    assert wait_until(lambda: any(
+        e.get("event") == "send_done" for e in list(events)))
+
+
+def test_scan_cache_lets_new_session_send_without_rescan(
+        session, tree, tmp_path, monkeypatch):
+    """PRD F18: a scan is persisted; a later session (fresh app start) can
+    load it via scan_cache and start_send immediately - no re-walk of a
+    possibly huge tree."""
+    from lanmigrate import engine, ipc, scanner
+
+    monkeypatch.setattr(scanner, "SCANS_DIR", tmp_path / "scans")
+    monkeypatch.setattr(taskstore, "TASKS_DIR", tmp_path / "tasks")
+    first = call(session, "scan", {"path": str(tree)})
+    assert first["ok"] is True
+
+    events2: list[dict] = []
+    sess2 = ipc.Session(events2.append)
+    cached = call((sess2, events2), "scan_cache", {"path": str(tree)})
+    assert cached["ok"] is True
+    r = cached["result"]
+    assert r["cached"] is True and r["cached_at"]
+    assert r["exclusions"] == first["result"]["exclusions"]
+    assert r["file_count"] == first["result"]["file_count"]
+
+    monkeypatch.setattr(engine, "obscure", lambda pw: "OBSC")
+    monkeypatch.setattr(
+        engine, "run_copy",
+        lambda source, remote, filter_file=None, log_file=None,
+        on_progress=None, on_start=None, conflict="overwrite": 0)
+    sent = call((sess2, events2), "start_send",
+                {"source": str(tree), "host": "10.0.0.2", "code": "123456"},
+                rid=2)
+    assert sent["ok"] is True  # would fail with 请先扫描源目录 without the cache
+    assert wait_until(lambda: any(
+        e.get("event") == "send_done" and e.get("ok") for e in list(events2)))
+
+
+def test_scan_cache_miss_reports_uncached(session, tmp_path, monkeypatch):
+    from lanmigrate import scanner
+
+    monkeypatch.setattr(scanner, "SCANS_DIR", tmp_path / "scans")
+    d = tmp_path / "never-scanned"
+    d.mkdir()
+    reply = call(session, "scan_cache", {"path": str(d)})
+    assert reply["ok"] is True
+    assert reply["result"] == {"cached": False}
+
+
 def test_start_send_rejects_unknown_conflict(session):
     reply = call(session, "start_send",
                  {"source": "C:/x", "host": "1.2.3.4", "code": "123456",

@@ -159,6 +159,13 @@ class Session:
 
         report = scanner.scan(src, on_progress=progress, compute_sizes=full)
         self._scan_reports[str(report.root)] = report
+        try:  # PRD F18: remember the result so a re-send can skip the walk
+            scanner.save_report(report)
+        except Exception:
+            pass  # cache is a convenience, never a blocker
+        return self._scan_result(report)
+
+    def _scan_result(self, report: scanner.ScanReport) -> dict:
         return {
             "path": str(report.root),
             "file_count": report.file_count,
@@ -169,6 +176,21 @@ class Session:
             "large_git_dirs": [{"rel": r, "size": s}
                                for r, s in report.large_git_dirs],
         }
+
+    def ipc_scan_cache(self, path: str) -> dict:
+        """PRD F18: offer the last scan of this folder instead of re-walking
+        a huge tree. The cache only drives exclusion suggestions; the actual
+        transfer always copies the live directory contents."""
+        src = Path(path)
+        if not src.is_dir():
+            raise IpcError(f"目录不存在: {path}")
+        loaded = scanner.load_report(src)
+        if loaded is None:
+            return {"cached": False}
+        report, scanned_at = loaded
+        self._scan_reports[str(report.root)] = report
+        return dict(self._scan_result(report), cached=True,
+                    cached_at=scanned_at)
 
     # ------------------------------------------------------------ discover
 
@@ -363,6 +385,18 @@ class Session:
         self._start_worker(task, max_rounds, wait)
         return {"task": _task_info(task)}
 
+    def ipc_update_code(self, task_id: str, code: str) -> dict:
+        """PRD F18: re-pair a saved task after the receiver's pairing code
+        changed (e.g. receiver restarted without code reuse). Re-derives the
+        session password so resume can authenticate again."""
+        task = taskstore.load(task_id)
+        self._reject_if_running(task)
+        task.obscured_pass = engine.obscure(pairing.session_password(code))
+        taskstore.save(task)
+        if task.device_fp:  # keep the sender-side auto-fill in step with it
+            pairing.remember_device(task.device_fp, task.host, code)
+        return {"task": _task_info(task)}
+
     def ipc_cancel_send(self, task_id: Optional[str] = None) -> dict:
         """Cancel one running transfer (task_id given) or all of them."""
         hit = False
@@ -379,6 +413,19 @@ class Session:
         return {"cancelled": hit}
 
     # ------------------------------------------------------------ worker
+
+    def _classify_round(self, task: taskstore.MigrationTask,
+                        offset: int) -> tuple[str, str]:
+        """Classify one failed round from its slice of the task log (capped
+        at the last 256KB so a round with thousands of file errors stays
+        cheap). Any read problem degrades to ("other", "")."""
+        try:
+            size = task.log_file.stat().st_size
+            with open(task.log_file, encoding="utf-8", errors="replace") as fh:
+                fh.seek(max(offset, size - 262144))
+                return engine.classify_copy_errors(fh.read())
+        except OSError:
+            return ("other", "")
 
     def _reject_if_running(self, task: taskstore.MigrationTask) -> None:
         job = self._jobs.get(task.task_id)
@@ -426,6 +473,8 @@ class Session:
                     break
                 self._emit({"event": "round", "task_id": task.task_id,
                             "round": rnd})
+                log_offset = (task.log_file.stat().st_size
+                              if task.log_file.exists() else 0)
                 rc = engine.run_copy(Path(task.source), remote,
                                      filter_file=task.filter_file,
                                      log_file=task.log_file,
@@ -448,9 +497,24 @@ class Session:
                                 "saved_bytes": task.saved_bytes,
                                 "log": str(task.log_file)})
                     return
+                # PRD F18: read THIS round's log slice to tell the user why.
+                # An auth failure can never heal by retrying - the password
+                # is derived from the pairing code - so stop and ask for the
+                # receiver's current code instead of looping 100 rounds.
+                reason, detail = self._classify_round(task, log_offset)
+                if reason == "auth":
+                    self._emit({
+                        "event": "send_done", "ok": False, "cancelled": False,
+                        "need_code": True, "task_id": task.task_id,
+                        "source": task.source,
+                        "error": "配对码不匹配:接收端的配对码已更换"
+                                 "(接收端重启后若未勾选“沿用上次的配对码”"
+                                 "会生成新码)。请查看接收端当前显示的配对码。"})
+                    return
                 self._emit({"event": "round_failed", "task_id": task.task_id,
                             "round": rnd, "exit_code": rc, "wait": wait,
-                            "errors": last.errors})
+                            "errors": last.errors,
+                            "reason": reason, "detail": detail})
                 if job.cancel.wait(wait):
                     break
             taskstore.save(task)  # interrupt-safe: persist before reporting

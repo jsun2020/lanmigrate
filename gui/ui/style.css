@@ -228,6 +228,9 @@ input:focus { outline: 2px solid rgba(24,105,220,.35); }
 .sync-item .src { flex: 1; font-family: Consolas, monospace; word-break: break-all; }
 .sync-item .dst { color: var(--dim); white-space: nowrap; }
 
+.task-repair { margin-top: 10px; }
+.task-repair input { width: 140px; }
+
 /* toast */
 .toast {
   position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);

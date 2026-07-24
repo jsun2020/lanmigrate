@@ -362,15 +362,52 @@ $("btn-send-pick").onclick = async () => {
   if (!picked) return;
   sourceDir = picked;
   $("send-source").textContent = picked;
-  $("scan-status").textContent = "正在快速扫描…(仅识别可跳过的依赖目录,秒级)";
   $("btn-send-pick").disabled = true;
   try {
-    scanResult = await call("scan", { path: picked });
-    $("scan-status").textContent =
-      `共 ${scanResult.file_count} 个文件,发现 ${scanResult.exclusions.length} 个可跳过的依赖目录`;
-    renderExclusions();
-    $("send-step-exclude").classList.remove("hidden");
-    $("send-step-pick").classList.add("hidden");
+    // PRD F18: a folder scanned before skips the re-walk (minutes on huge
+    // trees) - the cached exclusion list is offered with a rescan option
+    try {
+      const c = await call("scan_cache", { path: picked });
+      if (c.cached) { enterExcludeStep(c, c.cached_at); return; }
+    } catch { /* cache is best-effort; fall through to a real scan */ }
+    await runScan(picked);
+  } catch (e) {
+    $("scan-status").textContent = "扫描失败: " + e.message;
+  } finally {
+    $("btn-send-pick").disabled = false;
+  }
+};
+
+async function runScan(picked) {
+  $("scan-status").textContent = "正在快速扫描…(仅识别可跳过的依赖目录,秒级)";
+  const r = await call("scan", { path: picked });
+  enterExcludeStep(r, null);
+}
+
+function enterExcludeStep(result, cachedAt) {
+  scanResult = result;
+  $("scan-status").textContent = "";
+  const note = $("exclude-cache-note");
+  if (cachedAt) {
+    note.textContent =
+      `已使用上次的扫描结果(${cachedAt.slice(0, 16).replace("T", " ")}),无需等待。` +
+      "跳过建议很少变化,可放心直接下一步;文件的增删不影响传输本身。";
+    note.classList.remove("hidden");
+  } else {
+    note.classList.add("hidden");
+  }
+  $("btn-force-rescan").classList.toggle("hidden", !cachedAt);
+  renderExclusions();
+  $("send-step-exclude").classList.remove("hidden");
+  $("send-step-pick").classList.add("hidden");
+}
+
+$("btn-force-rescan").onclick = async () => {
+  $("send-step-exclude").classList.add("hidden");
+  $("send-step-pick").classList.remove("hidden");
+  $("btn-send-pick").disabled = true;
+  try {
+    await runScan(sourceDir);
   } catch (e) {
     $("scan-status").textContent = "扫描失败: " + e.message;
   } finally {
@@ -602,10 +639,16 @@ on("round", (m) => {
   if (t) t.round = m.round;
 });
 
+// PRD F18: say WHY the round failed - a receiver that is offline reads very
+// differently from files that are simply locked by other programs.
 on("round_failed", (m) => {
   const t = activeTasks.get(m.task_id);
-  if (t) t.statsEl.textContent =
-    `第 ${m.round} 轮结束,仍有文件未完成,${m.wait} 秒后自动重试…`;
+  if (!t) return;
+  const why = m.reason === "connect"
+    ? "连不上接收端,请确认接收端窗口开着并处于“开始接收”状态"
+    : "仍有文件未完成" +
+      (m.errors > 0 ? `(${m.errors} 个文件出错,可能正被其他程序占用)` : "");
+  t.statsEl.textContent = `第 ${m.round} 轮:${why},${m.wait} 秒后自动重试…`;
 });
 
 on("transfer_progress", (m) => {
@@ -645,6 +688,11 @@ on("send_done", (m) => {
       t.stateEl.textContent = "已暂停";
       t.stateEl.className = "task-state paused";
       t.statsEl.textContent = `已传输 ${human(m.bytes)},任务已保存,可随时继续`;
+    } else if (m.need_code) { // PRD F18: re-pair in place, no wizard restart
+      t.stateEl.textContent = "需要新配对码";
+      t.stateEl.className = "task-state fail";
+      t.statsEl.textContent = m.error || "配对码不匹配";
+      showRepairRow(t, m.task_id);
     } else {
       t.stateEl.textContent = "✗ 未完成";
       t.stateEl.className = "task-state fail";
@@ -657,12 +705,57 @@ on("send_done", (m) => {
   // only auto-navigate when the user is watching the progress screen -
   // finishing must never yank them out of the send wizard (PRD F14)
   if (!$("screen-progress").classList.contains("hidden")) maybeFinishAll();
-  else if (t) toast(m.ok ? "一个传输已完成" : "一个传输已结束");
+  else if (t) {
+    toast(m.ok ? "一个传输已完成"
+      : (m.need_code ? "配对码已变化,请到进度页输入接收端的新配对码"
+                     : "一个传输已结束"));
+  }
 });
+
+function showRepairRow(t, taskId) {
+  const old = t.card.querySelector(".task-repair");
+  if (old) old.remove();
+  const row = document.createElement("div");
+  row.className = "row task-repair";
+  const inp = document.createElement("input");
+  inp.maxLength = 6;
+  inp.inputMode = "numeric";
+  inp.placeholder = "接收端新配对码";
+  const btn = document.createElement("button");
+  btn.className = "primary";
+  btn.textContent = "用新配对码继续";
+  btn.onclick = async () => {
+    const code = inp.value.trim();
+    if (!/^\d{6}$/.test(code)) { toast("请输入 6 位数字配对码"); return; }
+    btn.disabled = true;
+    try {
+      await call("update_code", { task_id: taskId, code });
+      await call("resume", { task_id: taskId });
+      row.remove();
+      t.running = true;
+      t.done = null;
+      t.stateEl.textContent = "";
+      t.stateEl.className = "task-state";
+      t.cancelBtn.classList.remove("hidden");
+      t.statsEl.textContent = "已更新配对码,正在重新连接…";
+      updateProgressTitle();
+      refreshProgressBanner();
+    } catch (e) {
+      toast("更新配对码失败: " + e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  row.append(inp, btn);
+  t.card.appendChild(row);
+}
 
 function maybeFinishAll() {
   if (activeTasks.size === 0 || runningTasks().length > 0) return;
   const all = [...activeTasks.values()];
+  // a card waiting for a new pairing code must stay on screen - never
+  // sweep it away into the done/fail summary (PRD F18)
+  if (all.some((t) => t.done && t.done.need_code)) return;
   const okTasks = all.filter((t) => t.done && t.done.ok);
   const cancelled = all.filter((t) => t.done && t.done.cancelled);
   const totalBytes = all.reduce((s, t) => s + ((t.done && t.done.bytes) || 0), 0);

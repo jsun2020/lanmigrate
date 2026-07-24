@@ -6,12 +6,20 @@ name is hard-coded here.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import tomllib
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 RULES_FILE = Path(__file__).parent / "rules.toml"
+
+# Persisted scan results (PRD F18): re-sending an already-scanned folder can
+# skip the (minutes-long on huge trees) re-walk. Only exclusion SUGGESTIONS
+# come from the cache - the transfer itself always copies live contents.
+SCANS_DIR = Path.home() / ".lanmigrate" / "scans"
 
 # .git is never auto-excluded (history is valuable, PRD F3); we only report
 # large ones so the user can decide.
@@ -138,6 +146,53 @@ def scan(root: Path, rules_file: Path = RULES_FILE,
             on_progress(report.file_count, report.total_bytes, rel)
 
     return report
+
+
+def _report_cache_path(root: Path) -> Path:
+    key = hashlib.sha1(str(root).lower().encode("utf-8")).hexdigest()[:16]
+    return SCANS_DIR / f"{key}.json"
+
+
+def save_report(report: ScanReport) -> None:
+    """Persist a scan result for later reuse (PRD F18)."""
+    SCANS_DIR.mkdir(parents=True, exist_ok=True)
+    data = {
+        "root": str(report.root),
+        "scanned_at": datetime.now().isoformat(timespec="seconds"),
+        "file_count": report.file_count,
+        "total_bytes": report.total_bytes,
+        "global_patterns": report.global_patterns,
+        "large_git_dirs": [[r, s] for r, s in report.large_git_dirs],
+        "exclusions": [{"rel": e.rel, "rule": e.rule, "marker": e.marker,
+                        "size": e.size} for e in report.exclusions],
+    }
+    _report_cache_path(report.root).write_text(
+        json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def load_report(root: Path) -> tuple[ScanReport, str] | None:
+    """Load the cached scan for `root`, or None when absent/corrupt.
+    Returns (report, scanned_at ISO string)."""
+    root = Path(root).resolve()
+    try:
+        data = json.loads(_report_cache_path(root).read_text(encoding="utf-8"))
+        if data.get("root") != str(root):  # hash collision safety net
+            return None
+        report = ScanReport(
+            root=root,
+            global_patterns=list(data.get("global_patterns", [])),
+            total_bytes=int(data.get("total_bytes", 0)),
+            file_count=int(data.get("file_count", 0)),
+            large_git_dirs=[(r, int(s)) for r, s in data.get("large_git_dirs", [])],
+            exclusions=[Exclusion(path=root / e["rel"], rel=e["rel"],
+                                  rule=e.get("rule", ""),
+                                  marker=e.get("marker", ""),
+                                  size=int(e.get("size", -1)))
+                        for e in data.get("exclusions", [])],
+        )
+        return report, str(data.get("scanned_at", ""))
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
 
 
 def _escape_filter(rel: str) -> str:
